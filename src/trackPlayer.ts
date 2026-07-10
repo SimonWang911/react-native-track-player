@@ -10,6 +10,8 @@ import {
   TrackMetadataBase,
   NowPlayingMetadata,
   RepeatMode,
+  AudioOutputCompatibilityEvent,
+  StructuredPlaybackErrorEvent,
 } from './interfaces'
 
 const { TrackPlayerModule: TrackPlayer } = NativeModules
@@ -47,8 +49,18 @@ function registerPlaybackService(factory: () => ServiceHandler) {
   }
 }
 
+function addEventListener(
+  event: Event.PlaybackAudioOutputCompatibility,
+  listener: (data: AudioOutputCompatibilityEvent) => void
+): ReturnType<typeof emitter.addListener>
+function addEventListener(
+  event: Event.PlaybackError,
+  listener: (data: StructuredPlaybackErrorEvent) => void
+): ReturnType<typeof emitter.addListener>
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function addEventListener(event: Event, listener: (data: any) => void) {
+function addEventListener(event: Event, listener: (data: any) => void): ReturnType<typeof emitter.addListener>
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function addEventListener(event: Event, listener: (data: any) => void): ReturnType<typeof emitter.addListener> {
   return emitter.addListener(event, listener)
 }
 

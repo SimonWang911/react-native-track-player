@@ -19,6 +19,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.PowerManager;
 import android.os.PowerManager.WakeLock;
+import android.os.SystemClock;
 import android.util.Log;
 
 import androidx.media3.common.C;
@@ -33,8 +34,11 @@ import com.guichaguri.trackplayer.module.MusicEvents;
 import com.guichaguri.trackplayer.service.errors.StructuredPlaybackError;
 import com.guichaguri.trackplayer.service.metadata.MetadataManager;
 import com.guichaguri.trackplayer.service.models.Track;
+import com.guichaguri.trackplayer.service.player.AudioOutputController;
 import com.guichaguri.trackplayer.service.player.ExoPlayback;
 import com.guichaguri.trackplayer.service.player.LocalPlayback;
+import com.guichaguri.trackplayer.service.player.PlaybackLifecycleController;
+import com.guichaguri.trackplayer.service.player.PlaybackSnapshot;
 
 /**
  * @author Guichaguri
@@ -49,6 +53,9 @@ public class MusicManager {
 
     private final MetadataManager metadata;
     private ExoPlayback playback;
+    private Bundle playbackOptions = new Bundle();
+    private final Object lifecycleQueueToken = new Object();
+    private final PlaybackLifecycleController lifecycleController;
 
     // @RequiresApi(26)
     // private AudioFocusRequest focus = null;
@@ -82,6 +89,47 @@ public class MusicManager {
             wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL, "track-player-wifi-lock");
             wifiLock.setReferenceCounted(false);
         }
+
+        lifecycleController = new PlaybackLifecycleController(
+                new HandlerSerialQueue(service.handler, lifecycleQueueToken),
+                audioOffloadEnabled -> createLocalPlayback(playbackOptions, audioOffloadEnabled),
+                new PlaybackLifecycleController.PlayerOwner() {
+                    @Override
+                    public void install(AudioOutputController.PlayerAdapter player) {
+                        playback = (LocalPlayback)player;
+                    }
+
+                    @Override
+                    public void swap(
+                            AudioOutputController.PlayerAdapter oldPlayer,
+                            AudioOutputController.PlayerAdapter newPlayer
+                    ) {
+                        playback = (LocalPlayback)newPlayer;
+                    }
+
+                    @Override
+                    public void clear(AudioOutputController.PlayerAdapter player) {
+                        if (playback == player) playback = null;
+                    }
+                },
+                new PlaybackLifecycleController.Listener() {
+                    @Override
+                    public void onCompatibilityChanged(boolean recovered, boolean rebuilt) {
+                        emitAudioOutputCompatibility(recovered, rebuilt);
+                    }
+
+                    @Override
+                    public void onUnrecoveredAudioSinkError() {
+                        onError(new StructuredPlaybackError(
+                                "audio_sink_offload_failed",
+                                "Audio output failed after compatibility recovery",
+                                "audio_output",
+                                "audio_sink_offload_failed",
+                                false
+                        ));
+                    }
+                }
+        );
     }
 
     public ExoPlayback getPlayback() {
@@ -108,23 +156,14 @@ public class MusicManager {
         return service.handler;
     }
 
-    public void switchPlayback(ExoPlayback playback) {
-        if(this.playback != null) {
-            this.playback.stop();
-            this.playback.destroy();
-        }
-
-        this.playback = playback;
-
-        if(this.playback != null) {
-            this.playback.initialize();
-        }
+    public void setupPlayback(Bundle options) {
+        playbackOptions = new Bundle(options);
+        lifecycleController.setup(options.getBoolean("audioOffload", true));
     }
 
-    public LocalPlayback createLocalPlayback(Bundle options) {
+    private LocalPlayback createLocalPlayback(Bundle options, boolean shouldEnableAudioOffload) {
         boolean autoUpdateMetadata = options.getBoolean("autoUpdateMetadata", true);
         boolean shouldHandleAudioFocus = options.getBoolean("handleAudioFocus", true);
-        boolean shouldEnableAudioOffload = options.getBoolean("audioOffload", true);
         int minBuffer = (int)Utils.toMillis(options.getDouble("minBuffer", Utils.toSeconds(DEFAULT_MIN_BUFFER_MS)));
         int maxBuffer = (int)Utils.toMillis(options.getDouble("maxBuffer", Utils.toSeconds(DEFAULT_MAX_BUFFER_MS)));
         int playBuffer = (int)Utils.toMillis(options.getDouble("playBuffer", Utils.toSeconds(DEFAULT_BUFFER_FOR_PLAYBACK_MS)));
@@ -146,13 +185,7 @@ public class MusicManager {
 
 
         TrackSelectionParameters trackSelectionParameters = player.getTrackSelectionParameters().buildUpon()
-            .setAudioOffloadPreferences(new TrackSelectionParameters.AudioOffloadPreferences.Builder()
-                .setAudioOffloadMode(
-                    shouldEnableAudioOffload
-                        ? TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED
-                        : TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_DISABLED)
-                .setIsGaplessSupportRequired(true)
-                .build())
+            .setAudioOffloadPreferences(audioOffloadPreferences(shouldEnableAudioOffload))
             .build();
         player.setTrackSelectionParameters(trackSelectionParameters);
         // player.addAudioOffloadListener(new ExoPlayer.AudioOffloadListener() {
@@ -172,7 +205,42 @@ public class MusicManager {
         player.setAudioAttributes(new androidx.media3.common.AudioAttributes.Builder()
                 .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).setUsage(C.USAGE_MEDIA).build(), shouldHandleAudioFocus);
 
-        return new LocalPlayback(service, this, player, cacheMaxSize, autoUpdateMetadata);
+        return new LocalPlayback(
+                service,
+                this,
+                player,
+                cacheMaxSize,
+                autoUpdateMetadata,
+                shouldEnableAudioOffload
+        );
+    }
+
+    public static TrackSelectionParameters.AudioOffloadPreferences audioOffloadPreferences(boolean enabled) {
+        return new TrackSelectionParameters.AudioOffloadPreferences.Builder()
+                .setAudioOffloadMode(
+                        enabled
+                                ? TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED
+                                : TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_DISABLED
+                )
+                .setIsGaplessSupportRequired(true)
+                .build();
+    }
+
+    public void onUserPlayIntentChanged(PlaybackSnapshot.UserPlayIntent userPlayIntent) {
+        lifecycleController.setUserPlayIntent(userPlayIntent);
+    }
+
+    public void onAudioSinkError() {
+        lifecycleController.onAudioSinkError();
+    }
+
+    private void emitAudioOutputCompatibility(boolean recovered, boolean rebuilt) {
+        Bundle bundle = new Bundle();
+        bundle.putString("reason", "audio_sink_offload_failed");
+        bundle.putBoolean("effectiveAudioOffload", false);
+        bundle.putBoolean("recovered", recovered);
+        bundle.putBoolean("rebuilt", rebuilt);
+        service.emit(MusicEvents.PLAYBACK_AUDIO_OUTPUT_COMPATIBILITY, bundle);
     }
 
     @SuppressLint("WakelockTimeout")
@@ -421,7 +489,7 @@ public class MusicManager {
         }
 
         // Release the playback resources
-        if(playback != null) playback.destroy();
+        lifecycleController.destroy();
 
         // Release the metadata resources
         metadata.destroy();
@@ -429,6 +497,30 @@ public class MusicManager {
         // Release the locks
         if(wakeLock.isHeld()) wakeLock.release();
         if(wifiLock != null && wifiLock.isHeld()) wifiLock.release();
+    }
+
+    private static final class HandlerSerialQueue implements PlaybackLifecycleController.SerialQueue {
+        private final Handler handler;
+        private final Object token;
+
+        private HandlerSerialQueue(Handler handler, Object token) {
+            this.handler = handler;
+            this.token = token;
+        }
+
+        @Override
+        public void post(Runnable task) {
+            if (android.os.Looper.myLooper() == handler.getLooper()) {
+                task.run();
+            } else {
+                handler.postAtTime(task, token, SystemClock.uptimeMillis());
+            }
+        }
+
+        @Override
+        public void clearPending() {
+            handler.removeCallbacksAndMessages(token);
+        }
     }
 
 }

@@ -34,15 +34,15 @@ public class MusicBinder extends Binder {
 
         // TODO remove?
         if(playback == null) {
-            playback = manager.createLocalPlayback(new Bundle());
-            manager.switchPlayback(playback);
+            manager.setupPlayback(new Bundle());
+            playback = manager.getPlayback();
         }
 
         return playback;
     }
 
     public void setupPlayer(Bundle bundle, Promise promise) {
-        manager.switchPlayback(manager.createLocalPlayback(bundle));
+        manager.setupPlayback(bundle);
         promise.resolve(null);
     }
 

@@ -43,6 +43,16 @@ import java.util.List;
 @UnstableApi
 public abstract class ExoPlayback<T extends Player> implements Player.Listener, MetadataOutput {
 
+    public enum PlayerPhase {
+        IDLE,
+        LOADING,
+        BUFFERING,
+        PLAYING,
+        PAUSED,
+        RECOVERING,
+        ENDED
+    }
+
     protected final Context context;
     protected final MusicManager manager;
     protected final T player;
@@ -55,6 +65,7 @@ public abstract class ExoPlayback<T extends Player> implements Player.Listener, 
     protected int previousState = PlaybackStateCompat.STATE_NONE;
     protected float volumeMultiplier = 1.0F;
     protected boolean autoUpdateMetadata;
+    protected PlayerPhase playerPhase = PlayerPhase.IDLE;
 
     public ExoPlayback(Context context, MusicManager manager, T player, boolean autoUpdateMetadata) {
         this.context = context;
@@ -155,14 +166,17 @@ public abstract class ExoPlayback<T extends Player> implements Player.Listener, 
     }
 
     public void play() {
+        manager.onUserPlayIntentChanged(PlaybackSnapshot.UserPlayIntent.PLAY);
         player.setPlayWhenReady(true);
     }
 
     public void pause() {
+        manager.onUserPlayIntentChanged(PlaybackSnapshot.UserPlayIntent.PAUSE);
         player.setPlayWhenReady(false);
     }
 
     public void stop() {
+        manager.onUserPlayIntentChanged(PlaybackSnapshot.UserPlayIntent.PAUSE);
         lastKnownWindow = C.INDEX_UNSET;
         lastKnownPosition = C.INDEX_UNSET;
 
@@ -172,6 +186,7 @@ public abstract class ExoPlayback<T extends Player> implements Player.Listener, 
     }
 
     public void reset() {
+        manager.onUserPlayIntentChanged(PlaybackSnapshot.UserPlayIntent.PAUSE);
         lastKnownWindow = C.INDEX_UNSET;
         lastKnownPosition = C.INDEX_UNSET;
 
@@ -347,6 +362,18 @@ public abstract class ExoPlayback<T extends Player> implements Player.Listener, 
         manager.onError(PlaybackErrorClassifierRegistry.classify(error));
     }
 
+    public PlayerPhase getPlayerPhase() {
+        return playerPhase;
+    }
+
+    public void beginRecovery() {
+        playerPhase = PlayerPhase.RECOVERING;
+    }
+
+    public void endRecovery() {
+        updatePlayerPhase();
+    }
+
     @Override
     public void onPlaybackParametersChanged(@NonNull PlaybackParameters playbackParameters) {
         // Speed or pitch changes
@@ -358,6 +385,8 @@ public abstract class ExoPlayback<T extends Player> implements Player.Listener, 
     // }
 
     private void handlePlaybackStateChange() {
+        if (playerPhase == PlayerPhase.RECOVERING) return;
+        updatePlayerPhase();
         int state = getState();
 
         if(state != previousState) {
@@ -378,6 +407,25 @@ public abstract class ExoPlayback<T extends Player> implements Player.Listener, 
                 manager.onTrackUpdate(previous, position, null, null);
                 manager.onEnd(getCurrentTrackIndex(), getPosition());
             }
+        }
+    }
+
+    private void updatePlayerPhase() {
+        switch (player.getPlaybackState()) {
+            case Player.STATE_BUFFERING:
+                playerPhase = PlayerPhase.BUFFERING;
+                break;
+            case Player.STATE_ENDED:
+                playerPhase = PlayerPhase.ENDED;
+                break;
+            case Player.STATE_IDLE:
+                playerPhase = PlayerPhase.IDLE;
+                break;
+            case Player.STATE_READY:
+                playerPhase = player.getPlayWhenReady() ? PlayerPhase.PLAYING : PlayerPhase.PAUSED;
+                break;
+            default:
+                playerPhase = PlayerPhase.LOADING;
         }
     }
 

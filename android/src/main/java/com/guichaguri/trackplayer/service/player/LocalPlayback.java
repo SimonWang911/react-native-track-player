@@ -16,6 +16,7 @@ import androidx.media3.datasource.cache.CacheSpan;
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor;
 import androidx.media3.datasource.cache.SimpleCache;
 import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.analytics.AnalyticsListener;
 import androidx.media3.exoplayer.source.MediaSource;
 
 import com.guichaguri.trackplayer.service.MusicManager;
@@ -33,16 +34,24 @@ import java.util.NavigableSet;
  * @author Guichaguri
  */
 @UnstableApi
-public class LocalPlayback extends ExoPlayback<ExoPlayer> {
+public class LocalPlayback extends ExoPlayback<ExoPlayer> implements AudioOutputController.PlayerAdapter {
 
     private final long cacheMaxSize;
 
     private SimpleCache cache;
     private boolean prepared = false;
+    private boolean audioOffloadEnabled;
+    private final AnalyticsListener audioOutputListener = new AnalyticsListener() {
+        @Override
+        public void onAudioSinkError(EventTime eventTime, Exception audioSinkError) {
+            manager.onAudioSinkError();
+        }
+    };
     public LocalPlayback(Context context, MusicManager manager, ExoPlayer player, long maxCacheSize,
-                         boolean autoUpdateMetadata) {
+                         boolean autoUpdateMetadata, boolean audioOffloadEnabled) {
         super(context, manager, player, autoUpdateMetadata);
         this.cacheMaxSize = maxCacheSize;
+        this.audioOffloadEnabled = audioOffloadEnabled;
     }
 
     @Override
@@ -55,9 +64,22 @@ public class LocalPlayback extends ExoPlayback<ExoPlayer> {
             cache = null;
         }
 
-        super.initialize();
+        if (!queue.isEmpty()) {
+            int currentIndex = player.getCurrentMediaItemIndex();
+            long positionMs = player.getCurrentPosition();
+            boolean playWhenReady = player.getPlayWhenReady();
+            player.clearMediaItems();
+            for (Track track : queue) {
+                player.addMediaSource(track.toMediaSource(context, this));
+            }
+            player.prepare();
+            player.seekTo(currentIndex, positionMs);
+            player.setPlayWhenReady(playWhenReady);
+            prepared = true;
+        }
 
-        resetQueue();
+        super.initialize();
+        player.addAnalyticsListener(audioOutputListener);
     }
 
     public DataSource.Factory enableCaching(DataSource.Factory ds) {
@@ -101,7 +123,7 @@ public class LocalPlayback extends ExoPlayback<ExoPlayer> {
         promise.resolve(null);
     }
 
-    private void prepare() {
+    private void ensurePrepared() {
         if(!prepared) {
             Log.d(Utils.LOG, "Preparing the media source...");
             player.prepare();
@@ -110,12 +132,92 @@ public class LocalPlayback extends ExoPlayback<ExoPlayer> {
     }
 
     @Override
+    public List<Object> getQueueSnapshot() {
+        return new ArrayList<>(queue);
+    }
+
+    @Override
+    public int getCurrentIndex() {
+        return player.getCurrentMediaItemIndex();
+    }
+
+    @Override
+    public long getPositionMs() {
+        return player.getCurrentPosition();
+    }
+
+    @Override
+    public void restoreQueue(List<Object> restoredQueue) {
+        queue.clear();
+        player.clearMediaItems();
+        for (Object item : restoredQueue) {
+            Track track = (Track)item;
+            queue.add(track);
+            player.addMediaSource(track.toMediaSource(context, this));
+        }
+        player.prepare();
+        prepared = !queue.isEmpty();
+    }
+
+    @Override
+    public void seekTo(int index, long positionMs) {
+        if (queue.isEmpty()) return;
+        player.seekTo(index, positionMs);
+    }
+
+    @Override
+    public void setPlayWhenReady(boolean playWhenReady) {
+        player.setPlayWhenReady(playWhenReady);
+    }
+
+    @Override
+    public boolean isAudioOffloadEnabled() {
+        return audioOffloadEnabled;
+    }
+
+    @Override
+    public void setAudioOffloadEnabled(boolean enabled) {
+        player.setTrackSelectionParameters(
+                player.getTrackSelectionParameters().buildUpon()
+                        .setAudioOffloadPreferences(MusicManager.audioOffloadPreferences(enabled))
+                        .build()
+        );
+        audioOffloadEnabled = enabled;
+    }
+
+    @Override
+    public void release() {
+        destroy();
+    }
+
+    @Override
+    public void activate() {
+        initialize();
+    }
+
+    @Override
+    public void prepare() {
+        player.prepare();
+        prepared = !queue.isEmpty();
+    }
+
+    @Override
+    public void beginRecovery() {
+        super.beginRecovery();
+    }
+
+    @Override
+    public void endRecovery() {
+        super.endRecovery();
+    }
+
+    @Override
     public void add(Track track, int index, Promise promise) {
         queue.add(index, track);
         MediaSource trackSource = track.toMediaSource(context, this);
         player.addMediaSource(index, trackSource);
         promise.resolve(index);
-        prepare();
+        ensurePrepared();
     }
 
     @Override
@@ -130,7 +232,7 @@ public class LocalPlayback extends ExoPlayback<ExoPlayer> {
         player.addMediaSources(index, trackList);
         promise.resolve(index);
 
-        prepare();
+        ensurePrepared();
     }
 
     @Override
@@ -200,7 +302,7 @@ public class LocalPlayback extends ExoPlayback<ExoPlayer> {
 
     @Override
     public void play() {
-        prepare();
+        ensurePrepared();
         super.play();
     }
 
@@ -212,7 +314,7 @@ public class LocalPlayback extends ExoPlayback<ExoPlayer> {
 
     @Override
     public void seekTo(long time) {
-        prepare();
+        ensurePrepared();
         super.seekTo(time);
     }
 
@@ -254,6 +356,7 @@ public class LocalPlayback extends ExoPlayback<ExoPlayer> {
 
     @Override
     public void destroy() {
+        player.removeAnalyticsListener(audioOutputListener);
         super.destroy();
 
         if(cache != null) {

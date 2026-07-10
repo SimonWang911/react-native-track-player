@@ -105,8 +105,8 @@ public class MusicService extends HeadlessJsTaskService {
             return START_NOT_STICKY;
         }
 
-        manager = new MusicManager(this);
         handler = new Handler();
+        manager = new MusicManager(this);
 
         super.onStartCommand(intent, flags, startId);
         return START_NOT_STICKY;

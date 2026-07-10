@@ -143,6 +143,7 @@ export declare enum Event {
     PlaybackQueueEnded = "playback-queue-ended",
     PlaybackTrackChanged = "playback-track-changed",
     PlaybackMetadataReceived = "playback-metadata-received",
+    PlaybackAudioOutputCompatibility = "playback-audio-output-compatibility",
     RemotePlay = "remote-play",
     RemotePlayId = "remote-play-id",
     RemotePlaySearch = "remote-play-search",
@@ -222,4 +223,13 @@ export interface StructuredPlaybackErrorEvent {
     domain: PlaybackErrorDomain;
     reason: string;
     recoverable: boolean;
+}
+export type UserPlayIntent = 'play' | 'pause';
+export type PlayerPhase = 'idle' | 'loading' | 'buffering' | 'playing' | 'paused' | 'recovering' | 'ended';
+export type AudioOutputPhase = 'normal' | 'offload_failed' | 'compatibility_mode';
+export interface AudioOutputCompatibilityEvent {
+    reason: 'audio_sink_offload_failed';
+    effectiveAudioOffload: false;
+    recovered: boolean;
+    rebuilt: boolean;
 }

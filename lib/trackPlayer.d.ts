@@ -1,9 +1,13 @@
-import { MetadataOptions, PlayerOptions, Event, Track, State, TrackMetadataBase, NowPlayingMetadata, RepeatMode } from './interfaces';
+import { NativeEventEmitter } from 'react-native';
+import { MetadataOptions, PlayerOptions, Event, Track, State, TrackMetadataBase, NowPlayingMetadata, RepeatMode, AudioOutputCompatibilityEvent, StructuredPlaybackErrorEvent } from './interfaces';
+declare const emitter: NativeEventEmitter | import("react-native").DeviceEventEmitterStatic;
 declare function setupPlayer(options?: PlayerOptions): Promise<void>;
 declare function destroy(): any;
 type ServiceHandler = () => Promise<void>;
 declare function registerPlaybackService(factory: () => ServiceHandler): void;
-declare function addEventListener(event: Event, listener: (data: any) => void): import("react-native").EmitterSubscription;
+declare function addEventListener(event: Event.PlaybackAudioOutputCompatibility, listener: (data: AudioOutputCompatibilityEvent) => void): ReturnType<typeof emitter.addListener>;
+declare function addEventListener(event: Event.PlaybackError, listener: (data: StructuredPlaybackErrorEvent) => void): ReturnType<typeof emitter.addListener>;
+declare function addEventListener(event: Event, listener: (data: any) => void): ReturnType<typeof emitter.addListener>;
 declare function add(tracks: Track | Track[], insertBeforeIndex?: number): Promise<void>;
 declare function remove(tracks: number | number[]): Promise<void>;
 declare function removeUpcomingTracks(): Promise<void>;

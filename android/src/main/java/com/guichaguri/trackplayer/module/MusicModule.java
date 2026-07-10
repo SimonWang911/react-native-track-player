@@ -174,6 +174,8 @@ public class MusicModule extends ReactContextBaseJavaModule implements ServiceCo
         constants.put("REPEAT_TRACK", Player.REPEAT_MODE_ONE);
         constants.put("REPEAT_QUEUE", Player.REPEAT_MODE_ALL);
 
+        constants.put("EVENT_PLAYBACK_AUDIO_OUTPUT_COMPATIBILITY", MusicEvents.PLAYBACK_AUDIO_OUTPUT_COMPATIBILITY);
+
         return constants;
     }
 
