@@ -199,6 +199,181 @@ public class PlaybackLifecycleControllerTest {
         assertCompatibilityEvent(listener.events.get(1), true, true);
     }
 
+    @Test
+    public void delayedSetupCompletesOnlyAfterActivationValidationAndInstall() {
+        List<String> operations = new ArrayList<>();
+        ManualSerialQueue queue = new ManualSerialQueue();
+        RecordingFactory factory = new RecordingFactory(operations);
+        RecordingOwner owner = new RecordingOwner(operations);
+        RecordingListener listener = new RecordingListener(operations);
+        RecordingSetupCallback callback = new RecordingSetupCallback();
+        PlaybackLifecycleController controller = new PlaybackLifecycleController(queue, factory, owner, listener);
+
+        controller.setup(true, callback);
+
+        assertEquals(0, callback.successes);
+        assertEquals(0, callback.failures);
+        assertEquals(null, owner.current);
+        queue.runNext();
+
+        assertEquals(1, callback.successes);
+        assertEquals(0, callback.failures);
+        assertSame(factory.players.get(0), callback.player);
+        assertSame(factory.players.get(0), owner.current);
+        assertTrue(indexOf(operations, "player-1:validate") < indexOf(operations, "install"));
+    }
+
+    @Test
+    public void concurrentSetupCallsJoinOneInFlightGeneration() {
+        List<String> operations = new ArrayList<>();
+        ManualSerialQueue queue = new ManualSerialQueue();
+        RecordingFactory factory = new RecordingFactory(operations);
+        RecordingOwner owner = new RecordingOwner(operations);
+        RecordingListener listener = new RecordingListener(operations);
+        RecordingSetupCallback firstCallback = new RecordingSetupCallback();
+        RecordingSetupCallback secondCallback = new RecordingSetupCallback();
+        PlaybackLifecycleController controller = new PlaybackLifecycleController(queue, factory, owner, listener);
+
+        controller.setup(true, firstCallback);
+        controller.setup(true, secondCallback);
+
+        assertEquals(1, queue.tasks.size());
+        queue.runAll();
+
+        assertEquals(1, factory.players.size());
+        assertEquals(1, firstCallback.successes);
+        assertEquals(1, secondCallback.successes);
+        assertSame(factory.players.get(0), firstCallback.player);
+        assertSame(factory.players.get(0), secondCallback.player);
+        assertEquals(0, factory.players.get(0).releaseCalls);
+    }
+
+    @Test
+    public void activationFailureCompletesFailureQueueStaysLiveAndGenerationReleasesOnce() {
+        List<String> operations = new ArrayList<>();
+        HandlerSerialQueue queue = new HandlerSerialQueue(
+                new Handler(Looper.getMainLooper()),
+                new Object()
+        );
+        RecordingFactory factory = new RecordingFactory(operations);
+        factory.failNextActivation = true;
+        RecordingOwner owner = new RecordingOwner(operations);
+        RecordingListener listener = new RecordingListener(operations);
+        RecordingSetupCallback callback = new RecordingSetupCallback();
+        PlaybackLifecycleController controller = new PlaybackLifecycleController(queue, factory, owner, listener);
+
+        controller.setup(true, callback);
+        queue.post(() -> operations.add("after-setup-failure"));
+        shadowOf(Looper.getMainLooper()).idle();
+
+        LifecyclePlayer failed = factory.players.get(0);
+        assertEquals(0, callback.successes);
+        assertEquals(1, callback.failures);
+        assertEquals("activation failed", callback.error.getMessage());
+        assertEquals(1, failed.releaseCalls);
+        assertTrue(operations.contains("after-setup-failure"));
+        assertEquals(null, owner.current);
+
+        controller.destroy();
+        shadowOf(Looper.getMainLooper()).idle();
+        assertEquals(1, failed.releaseCalls);
+    }
+
+    @Test
+    public void destroyRejectsQueuedSetupAfterHandlerTokenCancellation() {
+        List<String> operations = new ArrayList<>();
+        HandlerSerialQueue queue = new HandlerSerialQueue(
+                new Handler(Looper.getMainLooper()),
+                new Object()
+        );
+        RecordingFactory factory = new RecordingFactory(operations);
+        RecordingOwner owner = new RecordingOwner(operations);
+        RecordingListener listener = new RecordingListener(operations);
+        RecordingSetupCallback callback = new RecordingSetupCallback();
+        PlaybackLifecycleController controller = new PlaybackLifecycleController(queue, factory, owner, listener);
+
+        controller.setup(true, callback);
+        controller.destroy();
+        shadowOf(Looper.getMainLooper()).idle();
+
+        assertEquals(0, factory.players.size());
+        assertEquals(0, callback.successes);
+        assertEquals(1, callback.failures);
+        assertEquals("Playback lifecycle is destroyed", callback.error.getMessage());
+        assertEquals(null, owner.current);
+    }
+
+    @Test
+    public void downgradeExceptionReportsTerminalQueueStaysLiveAndDestroyReleasesOnce() {
+        List<String> operations = new ArrayList<>();
+        HandlerSerialQueue queue = new HandlerSerialQueue(
+                new Handler(Looper.getMainLooper()),
+                new Object()
+        );
+        RecordingFactory factory = new RecordingFactory(operations);
+        RecordingOwner owner = new RecordingOwner(operations);
+        RecordingListener listener = new RecordingListener(operations);
+        RecordingSetupCallback callback = new RecordingSetupCallback();
+        PlaybackLifecycleController controller = new PlaybackLifecycleController(queue, factory, owner, listener);
+
+        controller.setup(true, callback);
+        shadowOf(Looper.getMainLooper()).idle();
+        LifecyclePlayer player = factory.players.get(0);
+        player.failPrepare = true;
+
+        controller.onAudioSinkError();
+        queue.post(() -> operations.add("after-recovery-failure"));
+        shadowOf(Looper.getMainLooper()).idle();
+
+        assertEquals(1, listener.unrecoveredErrors);
+        assertTrue(listener.events.isEmpty());
+        assertTrue(operations.contains("after-recovery-failure"));
+        assertEquals(0, player.releaseCalls);
+
+        controller.onAudioSinkError();
+        shadowOf(Looper.getMainLooper()).idle();
+        assertEquals(1, factory.players.size());
+        assertEquals(1, listener.unrecoveredErrors);
+        assertTrue(listener.events.isEmpty());
+
+        controller.destroy();
+        shadowOf(Looper.getMainLooper()).idle();
+        assertEquals(1, player.releaseCalls);
+    }
+
+    @Test
+    public void rebuildReleaseFailureReportsTerminalAndStopsFurtherRecovery() {
+        List<String> operations = new ArrayList<>();
+        HandlerSerialQueue queue = new HandlerSerialQueue(
+                new Handler(Looper.getMainLooper()),
+                new Object()
+        );
+        RecordingFactory factory = new RecordingFactory(operations);
+        RecordingOwner owner = new RecordingOwner(operations);
+        RecordingListener listener = new RecordingListener(operations);
+        PlaybackLifecycleController controller = new PlaybackLifecycleController(queue, factory, owner, listener);
+
+        controller.setup(true);
+        shadowOf(Looper.getMainLooper()).idle();
+        LifecyclePlayer first = factory.players.get(0);
+        controller.onAudioSinkError();
+        shadowOf(Looper.getMainLooper()).idle();
+        first.failRelease = true;
+
+        controller.onAudioSinkError();
+        shadowOf(Looper.getMainLooper()).idle();
+        assertEquals(1, listener.unrecoveredErrors);
+        assertEquals(1, listener.events.size());
+
+        controller.onAudioSinkError();
+        shadowOf(Looper.getMainLooper()).idle();
+
+        assertEquals(2, factory.players.size());
+        assertEquals(1, first.releaseCalls);
+        assertEquals(1, listener.events.size());
+        assertEquals(1, listener.unrecoveredErrors);
+    }
+
     private static void assertCompatibilityEvent(
             AudioOutputCompatibilityEvent event,
             boolean recovered,
@@ -337,6 +512,25 @@ public class PlaybackLifecycleControllerTest {
         }
     }
 
+    static class RecordingSetupCallback implements PlaybackLifecycleController.SetupCallback {
+        int successes;
+        int failures;
+        AudioOutputController.PlayerAdapter player;
+        RuntimeException error;
+
+        @Override
+        public void onSuccess(AudioOutputController.PlayerAdapter player) {
+            successes++;
+            this.player = player;
+        }
+
+        @Override
+        public void onFailure(RuntimeException error) {
+            failures++;
+            this.error = error;
+        }
+    }
+
     static class LifecyclePlayer implements AudioOutputController.PlayerAdapter {
         final String name;
         final List<String> operations;
@@ -352,6 +546,8 @@ public class PlaybackLifecycleControllerTest {
         int disableOffloadCalls;
         int releaseCalls;
         boolean failActivation;
+        boolean failPrepare;
+        boolean failRelease;
         Runnable prepareHook;
 
         LifecyclePlayer(String name, boolean offloadEnabled, List<String> operations) {
@@ -440,6 +636,7 @@ public class PlaybackLifecycleControllerTest {
         @Override
         public void prepare() {
             operations.add(name + ":prepare:start");
+            if (failPrepare) throw new IllegalStateException("prepare failed");
             if (prepareHook != null) prepareHook.run();
             operations.add(name + ":prepare:end");
         }
@@ -474,6 +671,7 @@ public class PlaybackLifecycleControllerTest {
         public void release() {
             releaseCalls++;
             operations.add(name + ":release");
+            if (failRelease) throw new IllegalStateException("release failed");
         }
     }
 }

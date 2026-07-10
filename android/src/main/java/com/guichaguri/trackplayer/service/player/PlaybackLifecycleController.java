@@ -1,5 +1,8 @@
 package com.guichaguri.trackplayer.service.player;
 
+import java.util.ArrayList;
+import java.util.List;
+
 public final class PlaybackLifecycleController {
 
     public interface SerialQueue {
@@ -25,15 +28,31 @@ public final class PlaybackLifecycleController {
         void onUnrecoveredAudioSinkError();
     }
 
+    public interface SetupCallback {
+        void onSuccess(AudioOutputController.PlayerAdapter player);
+        void onFailure(RuntimeException error);
+    }
+
+    private static final SetupCallback NO_OP_SETUP_CALLBACK = new SetupCallback() {
+        @Override
+        public void onSuccess(AudioOutputController.PlayerAdapter player) {}
+
+        @Override
+        public void onFailure(RuntimeException error) {}
+    };
+
     private final SerialQueue serialQueue;
     private final PlayerFactory playerFactory;
     private final PlayerOwner playerOwner;
     private final Listener listener;
+    private final List<SetupRequest> pendingSetupRequests = new ArrayList<>();
 
     private AudioOutputController.PlayerAdapter player;
     private AudioOutputController audioOutputController;
     private PlaybackSnapshot.UserPlayIntent userPlayIntent = PlaybackSnapshot.UserPlayIntent.PAUSE;
     private boolean rebuildUsed;
+    private boolean terminalErrorReported;
+    private boolean setupInFlight;
     private boolean destroyRequested;
 
     public PlaybackLifecycleController(
@@ -49,12 +68,30 @@ public final class PlaybackLifecycleController {
     }
 
     public synchronized void setup(boolean audioOffloadEnabled) {
-        if (destroyRequested) return;
+        setup(audioOffloadEnabled, NO_OP_SETUP_CALLBACK);
+    }
+
+    public synchronized void setup(
+            boolean audioOffloadEnabled,
+            SetupCallback setupCallback
+    ) {
+        SetupRequest setupRequest = new SetupRequest(setupCallback);
+        if (destroyRequested) {
+            setupRequest.failure(new IllegalStateException("Playback lifecycle is destroyed"));
+            return;
+        }
+        pendingSetupRequests.add(setupRequest);
+        if (setupInFlight) return;
+        setupInFlight = true;
         serialQueue.post(() -> {
-            if (destroyRequested) return;
-            AudioOutputController.PlayerAdapter created = playerFactory.create(audioOffloadEnabled);
+            if (destroyRequested) {
+                completePendingSetupFailure(new IllegalStateException("Playback lifecycle is destroyed"));
+                return;
+            }
+            AudioOutputController.PlayerAdapter created = null;
             AudioOutputController.PlayerAdapter previous = player;
             try {
+                created = playerFactory.create(audioOffloadEnabled);
                 created.activate();
                 created.validateReady();
                 if (previous == null) {
@@ -63,14 +100,44 @@ public final class PlaybackLifecycleController {
                     playerOwner.swap(previous, created);
                 }
             } catch (RuntimeException error) {
-                created.release();
-                throw error;
+                releaseFailedGeneration(created, error);
+                completePendingSetupFailure(error);
+                return;
             }
             player = created;
             audioOutputController = new AudioOutputController(created);
             rebuildUsed = false;
-            if (previous != null) previous.release();
+            terminalErrorReported = false;
+            if (previous != null) {
+                try {
+                    previous.release();
+                } catch (RuntimeException error) {
+                    completePendingSetupFailure(error);
+                    return;
+                }
+            }
+            completePendingSetupSuccess(created);
         });
+    }
+
+    private void completePendingSetupSuccess(AudioOutputController.PlayerAdapter created) {
+        List<SetupRequest> setupRequests;
+        synchronized (this) {
+            setupRequests = new ArrayList<>(pendingSetupRequests);
+            pendingSetupRequests.clear();
+            setupInFlight = false;
+        }
+        for (SetupRequest setupRequest : setupRequests) setupRequest.success(created);
+    }
+
+    private void completePendingSetupFailure(RuntimeException error) {
+        List<SetupRequest> setupRequests;
+        synchronized (this) {
+            setupRequests = new ArrayList<>(pendingSetupRequests);
+            pendingSetupRequests.clear();
+            setupInFlight = false;
+        }
+        for (SetupRequest setupRequest : setupRequests) setupRequest.failure(error);
     }
 
     public synchronized void setUserPlayIntent(PlaybackSnapshot.UserPlayIntent userPlayIntent) {
@@ -89,14 +156,20 @@ public final class PlaybackLifecycleController {
         if (destroyRequested) return;
         serialQueue.post(() -> {
             if (destroyRequested || audioOutputController == null || player == null) return;
+            if (terminalErrorReported) return;
 
             if (rebuildUsed) {
-                listener.onUnrecoveredAudioSinkError();
+                reportTerminalAudioSinkError();
                 return;
             }
 
-            AudioOutputController.RecoveryAction action =
-                    audioOutputController.onAudioSinkError(userPlayIntent);
+            AudioOutputController.RecoveryAction action;
+            try {
+                action = audioOutputController.onAudioSinkError(userPlayIntent);
+            } catch (RuntimeException error) {
+                reportTerminalAudioSinkError();
+                return;
+            }
             if (action == AudioOutputController.RecoveryAction.IN_INSTANCE_RECOVERED) {
                 listener.onCompatibilityChanged(new AudioOutputCompatibilityEvent(true, false));
                 return;
@@ -108,16 +181,16 @@ public final class PlaybackLifecycleController {
             }
             if (action == AudioOutputController.RecoveryAction.REBUILD_REQUIRED
                     || action == AudioOutputController.RecoveryAction.UNRECOVERED) {
-                listener.onUnrecoveredAudioSinkError();
+                reportTerminalAudioSinkError();
             }
         });
     }
 
     private void rebuildCurrentPlayer() {
         AudioOutputController.PlayerAdapter oldPlayer = player;
-        PlaybackSnapshot snapshot = PlaybackSnapshot.capture(oldPlayer, userPlayIntent);
         AudioOutputController.PlayerAdapter rebuiltPlayer = null;
         try {
+            PlaybackSnapshot snapshot = PlaybackSnapshot.capture(oldPlayer, userPlayIntent);
             rebuiltPlayer = playerFactory.create(false);
             rebuiltPlayer.beginRecovery();
             try {
@@ -131,12 +204,35 @@ public final class PlaybackLifecycleController {
             player = rebuiltPlayer;
             audioOutputController = AudioOutputController.compatibilityMode(rebuiltPlayer);
         } catch (RuntimeException error) {
-            if (rebuiltPlayer != null) rebuiltPlayer.release();
-            listener.onUnrecoveredAudioSinkError();
+            releaseFailedGeneration(rebuiltPlayer, error);
+            reportTerminalAudioSinkError();
             return;
         }
-        oldPlayer.release();
+        try {
+            oldPlayer.release();
+        } catch (RuntimeException error) {
+            reportTerminalAudioSinkError();
+            return;
+        }
         listener.onCompatibilityChanged(new AudioOutputCompatibilityEvent(true, true));
+    }
+
+    private void reportTerminalAudioSinkError() {
+        if (terminalErrorReported) return;
+        terminalErrorReported = true;
+        listener.onUnrecoveredAudioSinkError();
+    }
+
+    private static void releaseFailedGeneration(
+            AudioOutputController.PlayerAdapter failedPlayer,
+            RuntimeException failure
+    ) {
+        if (failedPlayer == null) return;
+        try {
+            failedPlayer.release();
+        } catch (RuntimeException releaseError) {
+            failure.addSuppressed(releaseError);
+        }
     }
 
     public synchronized PlaybackSnapshot.UserPlayIntent getUserPlayIntent() {
@@ -168,14 +264,53 @@ public final class PlaybackLifecycleController {
     public synchronized void destroy() {
         if (destroyRequested) return;
         destroyRequested = true;
+        List<SetupRequest> cancelledSetups = new ArrayList<>(pendingSetupRequests);
+        pendingSetupRequests.clear();
+        setupInFlight = false;
         serialQueue.clearPending();
         serialQueue.post(() -> {
+            RuntimeException destroyedError =
+                    new IllegalStateException("Playback lifecycle is destroyed");
+            for (SetupRequest setupRequest : cancelledSetups) {
+                setupRequest.failure(destroyedError);
+            }
             AudioOutputController.PlayerAdapter current = player;
             if (current == null) return;
-            playerOwner.clear(current);
-            current.release();
-            player = null;
-            audioOutputController = null;
+            try {
+                playerOwner.clear(current);
+            } finally {
+                try {
+                    current.release();
+                } finally {
+                    player = null;
+                    audioOutputController = null;
+                }
+            }
         });
+    }
+
+    private static final class SetupRequest {
+        private final SetupCallback callback;
+        private boolean completed;
+
+        SetupRequest(SetupCallback callback) {
+            this.callback = callback;
+        }
+
+        void success(AudioOutputController.PlayerAdapter player) {
+            synchronized (this) {
+                if (completed) return;
+                completed = true;
+            }
+            callback.onSuccess(player);
+        }
+
+        void failure(RuntimeException error) {
+            synchronized (this) {
+                if (completed) return;
+                completed = true;
+            }
+            callback.onFailure(error);
+        }
     }
 }

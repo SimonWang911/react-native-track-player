@@ -9,7 +9,11 @@ import androidx.media3.common.util.UnstableApi;
 import com.facebook.react.bridge.Promise;
 import com.guichaguri.trackplayer.service.metadata.MetadataManager;
 import com.guichaguri.trackplayer.service.models.NowPlayingMetadata;
+import com.guichaguri.trackplayer.service.player.AudioOutputController;
 import com.guichaguri.trackplayer.service.player.ExoPlayback;
+import com.guichaguri.trackplayer.service.player.PlaybackLifecycleController;
+
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * @author Guichaguri
@@ -17,12 +21,29 @@ import com.guichaguri.trackplayer.service.player.ExoPlayback;
 @UnstableApi
 public class MusicBinder extends Binder {
 
+    interface PlaybackAccess {
+        ExoPlayback getPlayback();
+        void setupPlayback(Bundle options, PlaybackLifecycleController.SetupCallback callback);
+    }
+
+    public static final class PlaybackNotInitializedException extends IllegalStateException {
+        public PlaybackNotInitializedException() {
+            super("The player is not initialized");
+        }
+    }
+
     private final MusicService service;
     private final MusicManager manager;
+    private final PlaybackAccess playbackAccess;
 
     public MusicBinder(MusicService service, MusicManager manager) {
+        this(service, manager, manager);
+    }
+
+    MusicBinder(MusicService service, MusicManager manager, PlaybackAccess playbackAccess) {
         this.service = service;
         this.manager = manager;
+        this.playbackAccess = playbackAccess;
     }
 
     public void post(Runnable r) {
@@ -30,20 +51,32 @@ public class MusicBinder extends Binder {
     }
 
     public ExoPlayback getPlayback() {
-        ExoPlayback playback = manager.getPlayback();
-
-        // TODO remove?
-        if(playback == null) {
-            manager.setupPlayback(new Bundle());
-            playback = manager.getPlayback();
-        }
-
+        ExoPlayback playback = playbackAccess.getPlayback();
+        if (playback == null) throw new PlaybackNotInitializedException();
         return playback;
     }
 
     public void setupPlayer(Bundle bundle, Promise promise) {
-        manager.setupPlayback(bundle);
-        promise.resolve(null);
+        AtomicBoolean completed = new AtomicBoolean();
+        try {
+            playbackAccess.setupPlayback(bundle, new PlaybackLifecycleController.SetupCallback() {
+                @Override
+                public void onSuccess(AudioOutputController.PlayerAdapter player) {
+                    if (completed.compareAndSet(false, true)) promise.resolve(null);
+                }
+
+                @Override
+                public void onFailure(RuntimeException error) {
+                    if (completed.compareAndSet(false, true)) {
+                        promise.reject("player_setup_failed", error);
+                    }
+                }
+            });
+        } catch (RuntimeException error) {
+            if (completed.compareAndSet(false, true)) {
+                promise.reject("player_setup_failed", error);
+            }
+        }
     }
 
     public void updateOptions(Bundle bundle) {

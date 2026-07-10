@@ -34,7 +34,6 @@ import com.guichaguri.trackplayer.service.errors.StructuredPlaybackError;
 import com.guichaguri.trackplayer.service.metadata.MetadataManager;
 import com.guichaguri.trackplayer.service.models.Track;
 import com.guichaguri.trackplayer.service.player.AudioOutputController;
-import com.guichaguri.trackplayer.service.player.AudioOutputCompatibilityEvent;
 import com.guichaguri.trackplayer.service.player.ExoPlayback;
 import com.guichaguri.trackplayer.service.player.HandlerSerialQueue;
 import com.guichaguri.trackplayer.service.player.LocalPlayback;
@@ -47,7 +46,7 @@ import com.guichaguri.trackplayer.service.player.PlaybackSnapshot;
  * @author Guichaguri
  */
 @UnstableApi
-public class MusicManager implements PlaybackEventHandler {
+public class MusicManager implements PlaybackEventHandler, MusicBinder.PlaybackAccess {
 
     private final MusicService service;
 
@@ -116,26 +115,11 @@ public class MusicManager implements PlaybackEventHandler {
                         if (playback == player) playback = null;
                     }
                 },
-                new PlaybackLifecycleController.Listener() {
-                    @Override
-                    public void onCompatibilityChanged(AudioOutputCompatibilityEvent event) {
-                        emitAudioOutputCompatibility(event);
-                    }
-
-                    @Override
-                    public void onUnrecoveredAudioSinkError() {
-                        onError(new StructuredPlaybackError(
-                                "audio_sink_offload_failed",
-                                "Audio output failed after compatibility recovery",
-                                "audio_output",
-                                "audio_sink_offload_failed",
-                                false
-                        ));
-                    }
-                }
+                new PlaybackRecoveryEventBridge(service)
         );
     }
 
+    @Override
     public ExoPlayback getPlayback() {
         return playback;
     }
@@ -166,12 +150,33 @@ public class MusicManager implements PlaybackEventHandler {
     }
 
     public void setupPlayback(Bundle options) {
-        playbackOptions = new Bundle(options);
-        if (playbackCache == null) {
-            long maxCacheSize = (long)(options.getDouble("maxCacheSize", 0) * 1024);
-            playbackCache = new PlaybackCache(service, maxCacheSize);
+        setupPlayback(options, new PlaybackLifecycleController.SetupCallback() {
+            @Override
+            public void onSuccess(AudioOutputController.PlayerAdapter player) {}
+
+            @Override
+            public void onFailure(RuntimeException error) {
+                Log.e(Utils.LOG, "Playback setup failed", error);
+            }
+        });
+    }
+
+    @Override
+    public void setupPlayback(
+            Bundle options,
+            PlaybackLifecycleController.SetupCallback callback
+    ) {
+        try {
+            playbackOptions = new Bundle(options);
+            if (playbackCache == null) {
+                long maxCacheSize = (long)(options.getDouble("maxCacheSize", 0) * 1024);
+                playbackCache = new PlaybackCache(service, maxCacheSize);
+            }
+        } catch (RuntimeException error) {
+            callback.onFailure(error);
+            return;
         }
-        lifecycleController.setup(options.getBoolean("audioOffload", true));
+        lifecycleController.setup(options.getBoolean("audioOffload", true), callback);
     }
 
     private LocalPlayback createLocalPlayback(Bundle options, boolean shouldEnableAudioOffload) {
@@ -244,10 +249,6 @@ public class MusicManager implements PlaybackEventHandler {
 
     public void onAudioSinkError() {
         lifecycleController.onAudioSinkError();
-    }
-
-    private void emitAudioOutputCompatibility(AudioOutputCompatibilityEvent event) {
-        service.emit(MusicEvents.PLAYBACK_AUDIO_OUTPUT_COMPATIBILITY, event.toBundle());
     }
 
     @SuppressLint("WakelockTimeout")
