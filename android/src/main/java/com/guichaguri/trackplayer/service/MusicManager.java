@@ -30,6 +30,7 @@ import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.LoadControl;
 
 import com.guichaguri.trackplayer.module.MusicEvents;
+import com.guichaguri.trackplayer.service.errors.StructuredPlaybackError;
 import com.guichaguri.trackplayer.service.metadata.MetadataManager;
 import com.guichaguri.trackplayer.service.models.Track;
 import com.guichaguri.trackplayer.service.player.ExoPlayback;
@@ -300,13 +301,13 @@ public class MusicManager {
     }
 
     public void onError(String code, String error) {
-        Log.d(Utils.LOG, "onError");
-        Log.e(Utils.LOG, "Playback error: " + code + " - " + error);
+        onError(new StructuredPlaybackError(code, error, "unknown", "unknown", false));
+    }
 
-        Bundle bundle = new Bundle();
-        bundle.putString("code", code);
-        bundle.putString("message", error);
-        service.emit(MusicEvents.PLAYBACK_ERROR, bundle);
+    public void onError(StructuredPlaybackError error) {
+        Log.d(Utils.LOG, "onError");
+        Log.e(Utils.LOG, "Playback error: " + error.getCode() + " - " + error.getMessage());
+        service.emit(MusicEvents.PLAYBACK_ERROR, error.toBundle());
     }
 
     public void onAudioFocusChange(boolean permanent, boolean paused, boolean ducking) {

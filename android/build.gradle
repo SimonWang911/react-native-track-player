@@ -92,4 +92,10 @@ dependencies {
     implementation "androidx.media:media:1.7.1"
     implementation "androidx.localbroadcastmanager:localbroadcastmanager:1.1.0"
     implementation "com.github.bumptech.glide:glide:5.0.5"
+
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.14.1'
+    testImplementation "androidx.media3:media3-exoplayer-dash:${media3Version}"
+    testImplementation "androidx.media3:media3-exoplayer-hls:${media3Version}"
+    testImplementation "androidx.media3:media3-exoplayer-smoothstreaming:${media3Version}"
 }

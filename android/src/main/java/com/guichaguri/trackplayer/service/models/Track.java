@@ -30,6 +30,7 @@ import androidx.media3.extractor.DefaultExtractorsFactory;
 
 import com.guichaguri.trackplayer.service.Utils;
 import com.guichaguri.trackplayer.service.player.LocalPlayback;
+import com.guichaguri.trackplayer.service.source.TrackDataSourceFactoryRegistry;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -134,19 +135,23 @@ public class Track extends TrackMetadata {
         return new QueueItem(descr, queueId);
     }
 
+    public Bundle toBundle() {
+        return originalItem;
+    }
+
     public MediaSource toMediaSource(Context ctx, LocalPlayback playback) {
         // Updates the user agent if not set
         if(userAgent == null || userAgent.isEmpty())
             userAgent = Util.getUserAgent(ctx, "react-native-track-player");
 
-        DataSource.Factory ds;
+        DataSource.Factory upstream;
 
         if(resourceId != 0) {
 
             try {
                 RawResourceDataSource raw = new RawResourceDataSource(ctx);
                 raw.open(new DataSpec(uri));
-                ds = () -> raw;
+                upstream = () -> raw;
             } catch(IOException ex) {
                 // Should never happen
                 throw new RuntimeException(ex);
@@ -155,34 +160,38 @@ public class Track extends TrackMetadata {
         } else if(Utils.isLocal(uri)) {
 
             // Creates a local source factory
-            ds = new DefaultDataSource.Factory(ctx);
+            upstream = new DefaultDataSource.Factory(ctx);
 
         } else {
 
             // Creates a default http source factory, enabling cross protocol redirects
-            DefaultHttpDataSource.Factory factory = new DefaultHttpDataSource.Factory()
+            DefaultHttpDataSource.Factory network = new DefaultHttpDataSource.Factory()
                     .setUserAgent(userAgent)
                     .setConnectTimeoutMs(DefaultHttpDataSource.DEFAULT_CONNECT_TIMEOUT_MILLIS)
                     .setReadTimeoutMs(DefaultHttpDataSource.DEFAULT_READ_TIMEOUT_MILLIS)
                     .setAllowCrossProtocolRedirects(true);
 
             if(headers != null) {
-                factory.setDefaultRequestProperties(headers);
+                network.setDefaultRequestProperties(headers);
             }
 
-            ds = playback.enableCaching(factory);
+            DataSource.Factory cached = playback.enableCaching(network);
+            upstream = cached;
 
         }
 
+        DataSource.Factory transformed =
+                TrackDataSourceFactoryRegistry.wrap(ctx, originalItem, upstream);
+
         switch(type) {
             case DASH:
-                return createDashSource(ds);
+                return createDashSource(transformed);
             case HLS:
-                return createHlsSource(ds);
+                return createHlsSource(transformed);
             case SMOOTH_STREAMING:
-                return createSsSource(ds);
+                return createSsSource(transformed);
             default:
-                return new ProgressiveMediaSource.Factory(ds, new DefaultExtractorsFactory()
+                return new ProgressiveMediaSource.Factory(transformed, new DefaultExtractorsFactory()
                         .setConstantBitrateSeekingEnabled(true))
                         .createMediaSource(MediaItem.fromUri(uri));
         }

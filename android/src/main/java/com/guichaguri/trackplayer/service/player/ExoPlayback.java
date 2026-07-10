@@ -24,20 +24,18 @@ import androidx.media3.common.Tracks;
 import androidx.media3.common.Metadata;
 import androidx.media3.common.TrackGroup;
 import androidx.media3.common.util.UnstableApi;
-import androidx.media3.datasource.HttpDataSource;
-import androidx.media3.exoplayer.ExoPlaybackException;
 import androidx.media3.exoplayer.metadata.MetadataOutput;
 
 import com.google.common.collect.ImmutableList;
 import com.guichaguri.trackplayer.service.MusicManager;
 import com.guichaguri.trackplayer.service.Utils;
+import com.guichaguri.trackplayer.service.errors.PlaybackErrorClassifierRegistry;
 import com.guichaguri.trackplayer.service.models.Track;
 
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
-import java.util.Objects;
 
 /**
  * @author Guichaguri
@@ -346,24 +344,7 @@ public abstract class ExoPlayback<T extends Player> implements Player.Listener, 
 
     @Override
     public void onPlayerError(PlaybackException error) {
-        String code;
-        Throwable cause = error.getCause();
-        if (cause instanceof HttpDataSource.HttpDataSourceException) {
-            code = "playback-source";
-        } else if (cause instanceof ExoPlaybackException) {
-            code = "playback-renderer";
-        } else {
-            code = "playback"; // Other unexpected errors related to the playback
-        }
-        // if(error.type == ExoPlaybackException.TYPE_SOURCE) {
-        //     code = "playback-source";
-        // } else if(error.type == ExoPlaybackException.TYPE_RENDERER) {
-        //    code = "playback-renderer";
-        // } else {
-        //     code = "playback"; // Other unexpected errors related to the playback
-        // }
-
-        manager.onError(code, Objects.requireNonNull(error.getCause()).getMessage());
+        manager.onError(PlaybackErrorClassifierRegistry.classify(error));
     }
 
     @Override

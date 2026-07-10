@@ -226,7 +226,12 @@ export interface NowPlayingMetadata extends TrackMetadataBase {
   elapsedTime?: number
 }
 
-export interface Track extends TrackMetadataBase {
+export interface TrackSourceTransform {
+  sourceTransformType?: string
+  sourceTransformToken?: string
+}
+
+export interface Track extends TrackMetadataBase, TrackSourceTransform {
   url: string | ResourceObject
   type?: TrackType
   userAgent?: string
@@ -236,4 +241,14 @@ export interface Track extends TrackMetadataBase {
   headers?: { [key: string]: any }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   [key: string]: any
+}
+
+export type PlaybackErrorDomain = 'source' | 'decoder' | 'audio_output' | 'decryption' | 'unknown'
+
+export interface StructuredPlaybackErrorEvent {
+  code: string
+  message: string
+  domain: PlaybackErrorDomain
+  reason: string
+  recoverable: boolean
 }

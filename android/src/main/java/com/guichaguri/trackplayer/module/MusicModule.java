@@ -448,7 +448,7 @@ public class MusicModule extends ReactContextBaseJavaModule implements ServiceCo
             List<Track> tracks = binder.getPlayback().getQueue();
 
             if (index >= 0 && index < tracks.size()) {
-                callback.resolve(Arguments.fromBundle(tracks.get(index).originalItem));
+                callback.resolve(Arguments.fromBundle(tracks.get(index).toBundle()));
             } else {
                 callback.resolve(null);
             }
@@ -462,7 +462,7 @@ public class MusicModule extends ReactContextBaseJavaModule implements ServiceCo
             List<Track> tracks = binder.getPlayback().getQueue();
 
             for(Track track : tracks) {
-                queue.add(track.originalItem);
+                queue.add(track.toBundle());
             }
 
             callback.resolve(Arguments.fromList(queue));
