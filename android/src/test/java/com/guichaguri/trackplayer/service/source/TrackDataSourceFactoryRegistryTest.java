@@ -71,7 +71,8 @@ public class TrackDataSourceFactoryRegistryTest {
         Path packageRoot = findPackageRoot();
         List<Path> roots = Arrays.asList(
                 packageRoot.resolve("android/src/main/java"),
-                packageRoot.resolve("src"));
+                packageRoot.resolve("src"),
+                packageRoot.resolve("lib"));
         String[] forbidden = {
                 "qm" + "c",
                 "e" + "key",
@@ -81,6 +82,7 @@ public class TrackDataSourceFactoryRegistryTest {
         };
 
         for (Path root : roots) {
+            if (!Files.isDirectory(root)) continue;
             try (Stream<Path> paths = Files.walk(root)) {
                 for (Path path : (Iterable<Path>) paths.filter(Files::isRegularFile)::iterator) {
                     String source = new String(Files.readAllBytes(path), StandardCharsets.UTF_8)
