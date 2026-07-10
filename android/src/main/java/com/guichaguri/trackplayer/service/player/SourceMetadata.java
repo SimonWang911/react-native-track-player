@@ -9,8 +9,6 @@ import androidx.media3.extractor.metadata.id3.TextInformationFrame;
 import androidx.media3.extractor.metadata.id3.UrlLinkFrame;
 import androidx.media3.extractor.metadata.vorbis.VorbisComment;
 
-import com.guichaguri.trackplayer.service.MusicManager;
-
 import java.nio.charset.StandardCharsets;
 
 @UnstableApi
@@ -19,11 +17,11 @@ public class SourceMetadata {
     /**
      * Reads metadata and triggers the metadata-received event
      */
-    public static void handleMetadata(MusicManager manager, Metadata metadata) {
-        handleId3Metadata(manager, metadata);
-        handleIcyMetadata(manager, metadata);
-        handleVorbisCommentMetadata(manager, metadata);
-        handleQuickTimeMetadata(manager, metadata);
+    public static void handleMetadata(PlaybackEventHandler events, Metadata metadata) {
+        handleId3Metadata(events, metadata);
+        handleIcyMetadata(events, metadata);
+        handleVorbisCommentMetadata(events, metadata);
+        handleQuickTimeMetadata(events, metadata);
     }
 
     /**
@@ -31,7 +29,7 @@ public class SourceMetadata {
      *
      * https://en.wikipedia.org/wiki/ID3
      */
-    private static void handleId3Metadata(MusicManager manager, Metadata metadata) {
+    private static void handleId3Metadata(PlaybackEventHandler events, Metadata metadata) {
         String title = null, url = null, artist = null, album = null, date = null, genre = null;
 
         for(int i = 0; i < metadata.length(); i++) {
@@ -80,7 +78,7 @@ public class SourceMetadata {
         }
 
         if (title != null || url != null || artist != null || album != null || date != null || genre != null) {
-            manager.onMetadataReceived("id3", title, url, artist, album, date, genre);
+            events.onMetadataReceived("id3", title, url, artist, album, date, genre);
         }
     }
 
@@ -89,7 +87,7 @@ public class SourceMetadata {
      *
      * https://cast.readme.io/docs/icy
      */
-    private static void handleIcyMetadata(MusicManager manager, Metadata metadata) {
+    private static void handleIcyMetadata(PlaybackEventHandler events, Metadata metadata) {
         for (int i = 0; i < metadata.length(); i++) {
             Metadata.Entry entry = metadata.get(i);
 
@@ -97,7 +95,7 @@ public class SourceMetadata {
                 // ICY headers
                 IcyHeaders icy = (IcyHeaders)entry;
 
-                manager.onMetadataReceived("icy-headers", icy.name, icy.url, null, null, null, icy.genre);
+                events.onMetadataReceived("icy-headers", icy.name, icy.url, null, null, null, icy.genre);
 
             } else if(entry instanceof IcyInfo) {
                 // ICY data
@@ -114,7 +112,7 @@ public class SourceMetadata {
                     title = icy.title;
                 }
 
-                manager.onMetadataReceived("icy", title, icy.url, artist, null, null, null);
+                events.onMetadataReceived("icy", title, icy.url, artist, null, null, null);
 
             }
         }
@@ -125,7 +123,7 @@ public class SourceMetadata {
      *
      * https://xiph.org/vorbis/doc/v-comment.html
      */
-    private static void handleVorbisCommentMetadata(MusicManager manager, Metadata metadata) {
+    private static void handleVorbisCommentMetadata(PlaybackEventHandler events, Metadata metadata) {
         String title = null, url = null, artist = null, album = null, date = null, genre = null;
 
         for (int i = 0; i < metadata.length(); i++) {
@@ -159,7 +157,7 @@ public class SourceMetadata {
         }
 
         if (title != null || url != null || artist != null || album != null || date != null || genre != null) {
-            manager.onMetadataReceived("vorbis-comment", title, url, artist, album, date, genre);
+            events.onMetadataReceived("vorbis-comment", title, url, artist, album, date, genre);
         }
     }
 
@@ -168,7 +166,7 @@ public class SourceMetadata {
      *
      * https://developer.apple.com/library/archive/documentation/QuickTime/QTFF/Metadata/Metadata.html
      */
-    private static void handleQuickTimeMetadata(MusicManager manager, Metadata metadata) {
+    private static void handleQuickTimeMetadata(PlaybackEventHandler events, Metadata metadata) {
         String title = null, artist = null, album = null, date = null, genre = null;
 
         for (int i = 0; i < metadata.length(); i++) {
@@ -203,7 +201,7 @@ public class SourceMetadata {
         }
 
         if (title != null || artist != null || album != null || date != null || genre != null) {
-            manager.onMetadataReceived("quicktime", title, null, artist, album, date, genre);
+            events.onMetadataReceived("quicktime", title, null, artist, album, date, genre);
         }
     }
 

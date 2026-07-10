@@ -21,6 +21,10 @@ public final class AudioOutputController {
         void prepare();
         void release();
         default void activate() {}
+        default void validateReady() {}
+        default ExoPlayback.PlayerPhase getPlayerPhase() {
+            return ExoPlayback.PlayerPhase.IDLE;
+        }
         default void beginRecovery() {}
         default void endRecovery() {}
     }
@@ -30,7 +34,21 @@ public final class AudioOutputController {
     private AudioOutputPhase phase = AudioOutputPhase.NORMAL;
 
     public AudioOutputController(PlayerAdapter player) {
+        this(player, AudioOutputPhase.NORMAL, false);
+    }
+
+    private AudioOutputController(
+            PlayerAdapter player,
+            AudioOutputPhase phase,
+            boolean inInstanceRecoveryUsed
+    ) {
         this.player = player;
+        this.phase = phase;
+        this.inInstanceRecoveryUsed = inInstanceRecoveryUsed;
+    }
+
+    public static AudioOutputController compatibilityMode(PlayerAdapter player) {
+        return new AudioOutputController(player, AudioOutputPhase.COMPATIBILITY_MODE, true);
     }
 
     public boolean isEffectiveAudioOffloadEnabled() {
@@ -41,11 +59,19 @@ public final class AudioOutputController {
         return phase;
     }
 
+    public boolean hasUsedInInstanceRecovery() {
+        return inInstanceRecoveryUsed;
+    }
+
     public RecoveryAction onPlaybackError(String domain, String reason) {
         return RecoveryAction.IGNORED;
     }
 
     public RecoveryAction onAudioSinkError(PlaybackSnapshot.UserPlayIntent userPlayIntent) {
+        if (!inInstanceRecoveryUsed && !player.isAudioOffloadEnabled()) {
+            return RecoveryAction.IGNORED;
+        }
+
         phase = AudioOutputPhase.OFFLOAD_FAILED;
 
         if (!inInstanceRecoveryUsed && player.isAudioOffloadEnabled()) {

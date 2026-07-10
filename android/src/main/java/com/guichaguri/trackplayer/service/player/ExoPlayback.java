@@ -27,7 +27,6 @@ import androidx.media3.common.util.UnstableApi;
 import androidx.media3.exoplayer.metadata.MetadataOutput;
 
 import com.google.common.collect.ImmutableList;
-import com.guichaguri.trackplayer.service.MusicManager;
 import com.guichaguri.trackplayer.service.Utils;
 import com.guichaguri.trackplayer.service.errors.PlaybackErrorClassifierRegistry;
 import com.guichaguri.trackplayer.service.models.Track;
@@ -54,7 +53,7 @@ public abstract class ExoPlayback<T extends Player> implements Player.Listener, 
     }
 
     protected final Context context;
-    protected final MusicManager manager;
+    protected final PlaybackEventHandler events;
     protected final T player;
 
     protected List<Track> queue = Collections.synchronizedList(new ArrayList<>());
@@ -67,9 +66,14 @@ public abstract class ExoPlayback<T extends Player> implements Player.Listener, 
     protected boolean autoUpdateMetadata;
     protected PlayerPhase playerPhase = PlayerPhase.IDLE;
 
-    public ExoPlayback(Context context, MusicManager manager, T player, boolean autoUpdateMetadata) {
+    public ExoPlayback(
+            Context context,
+            PlaybackEventHandler events,
+            T player,
+            boolean autoUpdateMetadata
+    ) {
         this.context = context;
-        this.manager = manager;
+        this.events = events;
         this.player = player;
         this.autoUpdateMetadata = autoUpdateMetadata;
 
@@ -109,7 +113,7 @@ public abstract class ExoPlayback<T extends Player> implements Player.Listener, 
         queue.set(index, track);
 
         if(currentIndex == index)
-            manager.getMetadata().updateMetadata(this, track, Utils.isPlaying(getState()));
+            events.onTrackMetadataChanged(this, track, Utils.isPlaying(getState()));
     }
 
     public Integer getCurrentTrackIndex() {
@@ -166,17 +170,17 @@ public abstract class ExoPlayback<T extends Player> implements Player.Listener, 
     }
 
     public void play() {
-        manager.onUserPlayIntentChanged(PlaybackSnapshot.UserPlayIntent.PLAY);
+        events.onUserPlayIntentChanged(PlaybackSnapshot.UserPlayIntent.PLAY);
         player.setPlayWhenReady(true);
     }
 
     public void pause() {
-        manager.onUserPlayIntentChanged(PlaybackSnapshot.UserPlayIntent.PAUSE);
+        events.onUserPlayIntentChanged(PlaybackSnapshot.UserPlayIntent.PAUSE);
         player.setPlayWhenReady(false);
     }
 
     public void stop() {
-        manager.onUserPlayIntentChanged(PlaybackSnapshot.UserPlayIntent.PAUSE);
+        events.onUserPlayIntentChanged(PlaybackSnapshot.UserPlayIntent.PAUSE);
         lastKnownWindow = C.INDEX_UNSET;
         lastKnownPosition = C.INDEX_UNSET;
 
@@ -186,7 +190,7 @@ public abstract class ExoPlayback<T extends Player> implements Player.Listener, 
     }
 
     public void reset() {
-        manager.onUserPlayIntentChanged(PlaybackSnapshot.UserPlayIntent.PAUSE);
+        events.onUserPlayIntentChanged(PlaybackSnapshot.UserPlayIntent.PAUSE);
         lastKnownWindow = C.INDEX_UNSET;
         lastKnownPosition = C.INDEX_UNSET;
 
@@ -289,7 +293,7 @@ public abstract class ExoPlayback<T extends Player> implements Player.Listener, 
                 if(duration != C.TIME_UNSET) lastKnownPosition = duration;
             }
 
-            manager.onTrackUpdate(prevIndex, lastKnownPosition, nextIndex, next);
+            events.onTrackUpdate(prevIndex, lastKnownPosition, nextIndex, next);
         }
         lastKnownWindow = player.getCurrentMediaItemIndex();
         lastKnownPosition = player.getCurrentPosition();
@@ -333,10 +337,10 @@ public abstract class ExoPlayback<T extends Player> implements Player.Listener, 
 
         switch (reason) {
             case PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS:
-                manager.onAudioFocusChange(true, true, false);
+                events.onAudioFocusChange(true, true, false);
                 break;
             case PLAY_WHEN_READY_CHANGE_REASON_AUDIO_BECOMING_NOISY:
-                manager.onAudioFocusChange(false, true, false);
+                events.onAudioFocusChange(false, true, false);
                 break;
         }
     }
@@ -354,12 +358,12 @@ public abstract class ExoPlayback<T extends Player> implements Player.Listener, 
                 break;
         }
 
-        manager.onAudioFocusChange(false, ducking, ducking);
+        events.onAudioFocusChange(false, ducking, ducking);
     }
 
     @Override
     public void onPlayerError(PlaybackException error) {
-        manager.onError(PlaybackErrorClassifierRegistry.classify(error));
+        events.onError(PlaybackErrorClassifierRegistry.classify(error));
     }
 
     public PlayerPhase getPlayerPhase() {
@@ -372,6 +376,7 @@ public abstract class ExoPlayback<T extends Player> implements Player.Listener, 
 
     public void endRecovery() {
         updatePlayerPhase();
+        previousState = getState();
     }
 
     @Override
@@ -391,21 +396,21 @@ public abstract class ExoPlayback<T extends Player> implements Player.Listener, 
 
         if(state != previousState) {
             if(Utils.isPlaying(state) && !Utils.isPlaying(previousState)) {
-                manager.onPlay();
+                events.onPlay();
             } else if(Utils.isPaused(state) && !Utils.isPaused(previousState)) {
-                manager.onPause();
+                events.onPause();
             } else if(Utils.isStopped(state) && !Utils.isStopped(previousState)) {
-                manager.onStop();
+                events.onStop();
             }
 
-            manager.onStateChange(state);
+            events.onStateChange(state);
             previousState = state;
 
             if(state == PlaybackStateCompat.STATE_STOPPED) {
                 Integer previous = getCurrentTrackIndex();
                 long position = getPosition();
-                manager.onTrackUpdate(previous, position, null, null);
-                manager.onEnd(getCurrentTrackIndex(), getPosition());
+                events.onTrackUpdate(previous, position, null, null);
+                events.onEnd(getCurrentTrackIndex(), getPosition());
             }
         }
     }
@@ -431,6 +436,6 @@ public abstract class ExoPlayback<T extends Player> implements Player.Listener, 
 
     @Override
     public void onMetadata(@NonNull Metadata metadata) {
-        SourceMetadata.handleMetadata(manager, metadata);
+        SourceMetadata.handleMetadata(events, metadata);
     }
 }

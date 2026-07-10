@@ -19,7 +19,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.PowerManager;
 import android.os.PowerManager.WakeLock;
-import android.os.SystemClock;
 import android.util.Log;
 
 import androidx.media3.common.C;
@@ -35,8 +34,12 @@ import com.guichaguri.trackplayer.service.errors.StructuredPlaybackError;
 import com.guichaguri.trackplayer.service.metadata.MetadataManager;
 import com.guichaguri.trackplayer.service.models.Track;
 import com.guichaguri.trackplayer.service.player.AudioOutputController;
+import com.guichaguri.trackplayer.service.player.AudioOutputCompatibilityEvent;
 import com.guichaguri.trackplayer.service.player.ExoPlayback;
+import com.guichaguri.trackplayer.service.player.HandlerSerialQueue;
 import com.guichaguri.trackplayer.service.player.LocalPlayback;
+import com.guichaguri.trackplayer.service.player.PlaybackCache;
+import com.guichaguri.trackplayer.service.player.PlaybackEventHandler;
 import com.guichaguri.trackplayer.service.player.PlaybackLifecycleController;
 import com.guichaguri.trackplayer.service.player.PlaybackSnapshot;
 
@@ -44,7 +47,7 @@ import com.guichaguri.trackplayer.service.player.PlaybackSnapshot;
  * @author Guichaguri
  */
 @UnstableApi
-public class MusicManager {
+public class MusicManager implements PlaybackEventHandler {
 
     private final MusicService service;
 
@@ -56,6 +59,7 @@ public class MusicManager {
     private Bundle playbackOptions = new Bundle();
     private final Object lifecycleQueueToken = new Object();
     private final PlaybackLifecycleController lifecycleController;
+    private PlaybackCache playbackCache;
 
     // @RequiresApi(26)
     // private AudioFocusRequest focus = null;
@@ -114,8 +118,8 @@ public class MusicManager {
                 },
                 new PlaybackLifecycleController.Listener() {
                     @Override
-                    public void onCompatibilityChanged(boolean recovered, boolean rebuilt) {
-                        emitAudioOutputCompatibility(recovered, rebuilt);
+                    public void onCompatibilityChanged(AudioOutputCompatibilityEvent event) {
+                        emitAudioOutputCompatibility(event);
                     }
 
                     @Override
@@ -152,12 +156,21 @@ public class MusicManager {
         return metadata;
     }
 
+    @Override
+    public void onTrackMetadataChanged(ExoPlayback<?> playback, Track track, boolean playing) {
+        metadata.updateMetadata(playback, track, playing);
+    }
+
     public Handler getHandler() {
         return service.handler;
     }
 
     public void setupPlayback(Bundle options) {
         playbackOptions = new Bundle(options);
+        if (playbackCache == null) {
+            long maxCacheSize = (long)(options.getDouble("maxCacheSize", 0) * 1024);
+            playbackCache = new PlaybackCache(service, maxCacheSize);
+        }
         lifecycleController.setup(options.getBoolean("audioOffload", true));
     }
 
@@ -168,7 +181,6 @@ public class MusicManager {
         int maxBuffer = (int)Utils.toMillis(options.getDouble("maxBuffer", Utils.toSeconds(DEFAULT_MAX_BUFFER_MS)));
         int playBuffer = (int)Utils.toMillis(options.getDouble("playBuffer", Utils.toSeconds(DEFAULT_BUFFER_FOR_PLAYBACK_MS)));
         int backBuffer = (int)Utils.toMillis(options.getDouble("backBuffer", Utils.toSeconds(DEFAULT_BACK_BUFFER_DURATION_MS)));
-        long cacheMaxSize = (long)(options.getDouble("maxCacheSize", 0) * 1024);
         int multiplier = DEFAULT_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS / DEFAULT_BUFFER_FOR_PLAYBACK_MS;
 
         LoadControl control = new DefaultLoadControl.Builder()
@@ -209,7 +221,7 @@ public class MusicManager {
                 service,
                 this,
                 player,
-                cacheMaxSize,
+                playbackCache,
                 autoUpdateMetadata,
                 shouldEnableAudioOffload
         );
@@ -234,13 +246,8 @@ public class MusicManager {
         lifecycleController.onAudioSinkError();
     }
 
-    private void emitAudioOutputCompatibility(boolean recovered, boolean rebuilt) {
-        Bundle bundle = new Bundle();
-        bundle.putString("reason", "audio_sink_offload_failed");
-        bundle.putBoolean("effectiveAudioOffload", false);
-        bundle.putBoolean("recovered", recovered);
-        bundle.putBoolean("rebuilt", rebuilt);
-        service.emit(MusicEvents.PLAYBACK_AUDIO_OUTPUT_COMPATIBILITY, bundle);
+    private void emitAudioOutputCompatibility(AudioOutputCompatibilityEvent event) {
+        service.emit(MusicEvents.PLAYBACK_AUDIO_OUTPUT_COMPATIBILITY, event.toBundle());
     }
 
     @SuppressLint("WakelockTimeout")
@@ -375,6 +382,7 @@ public class MusicManager {
     public void onError(StructuredPlaybackError error) {
         Log.d(Utils.LOG, "onError");
         Log.e(Utils.LOG, "Playback error: " + error.getCode() + " - " + error.getMessage());
+        lifecycleController.onPlaybackError(error.getDomain(), error.getReason());
         service.emit(MusicEvents.PLAYBACK_ERROR, error.toBundle());
     }
 
@@ -497,30 +505,6 @@ public class MusicManager {
         // Release the locks
         if(wakeLock.isHeld()) wakeLock.release();
         if(wifiLock != null && wifiLock.isHeld()) wifiLock.release();
-    }
-
-    private static final class HandlerSerialQueue implements PlaybackLifecycleController.SerialQueue {
-        private final Handler handler;
-        private final Object token;
-
-        private HandlerSerialQueue(Handler handler, Object token) {
-            this.handler = handler;
-            this.token = token;
-        }
-
-        @Override
-        public void post(Runnable task) {
-            if (android.os.Looper.myLooper() == handler.getLooper()) {
-                task.run();
-            } else {
-                handler.postAtTime(task, token, SystemClock.uptimeMillis());
-            }
-        }
-
-        @Override
-        public void clearPending() {
-            handler.removeCallbacksAndMessages(token);
-        }
     }
 
 }

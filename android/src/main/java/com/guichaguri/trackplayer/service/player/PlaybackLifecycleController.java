@@ -21,7 +21,7 @@ public final class PlaybackLifecycleController {
     }
 
     public interface Listener {
-        void onCompatibilityChanged(boolean recovered, boolean rebuilt);
+        void onCompatibilityChanged(AudioOutputCompatibilityEvent event);
         void onUnrecoveredAudioSinkError();
     }
 
@@ -54,17 +54,22 @@ public final class PlaybackLifecycleController {
             if (destroyRequested) return;
             AudioOutputController.PlayerAdapter created = playerFactory.create(audioOffloadEnabled);
             AudioOutputController.PlayerAdapter previous = player;
+            try {
+                created.activate();
+                created.validateReady();
+                if (previous == null) {
+                    playerOwner.install(created);
+                } else {
+                    playerOwner.swap(previous, created);
+                }
+            } catch (RuntimeException error) {
+                created.release();
+                throw error;
+            }
             player = created;
             audioOutputController = new AudioOutputController(created);
             rebuildUsed = false;
-            if (previous == null) {
-                created.activate();
-                playerOwner.install(created);
-            } else {
-                previous.release();
-                created.activate();
-                playerOwner.swap(previous, created);
-            }
+            if (previous != null) previous.release();
         });
     }
 
@@ -93,7 +98,7 @@ public final class PlaybackLifecycleController {
             AudioOutputController.RecoveryAction action =
                     audioOutputController.onAudioSinkError(userPlayIntent);
             if (action == AudioOutputController.RecoveryAction.IN_INSTANCE_RECOVERED) {
-                listener.onCompatibilityChanged(true, false);
+                listener.onCompatibilityChanged(new AudioOutputCompatibilityEvent(true, false));
                 return;
             }
             if (action == AudioOutputController.RecoveryAction.REBUILD_REQUIRED && !rebuildUsed) {
@@ -115,18 +120,49 @@ public final class PlaybackLifecycleController {
         try {
             rebuiltPlayer = playerFactory.create(false);
             rebuiltPlayer.beginRecovery();
-            snapshot.restore(rebuiltPlayer);
-            rebuiltPlayer.endRecovery();
-            oldPlayer.release();
+            try {
+                snapshot.restore(rebuiltPlayer);
+            } finally {
+                rebuiltPlayer.endRecovery();
+            }
             rebuiltPlayer.activate();
+            rebuiltPlayer.validateReady();
             playerOwner.swap(oldPlayer, rebuiltPlayer);
             player = rebuiltPlayer;
-            audioOutputController = new AudioOutputController(rebuiltPlayer);
-            listener.onCompatibilityChanged(true, true);
+            audioOutputController = AudioOutputController.compatibilityMode(rebuiltPlayer);
         } catch (RuntimeException error) {
             if (rebuiltPlayer != null) rebuiltPlayer.release();
             listener.onUnrecoveredAudioSinkError();
+            return;
         }
+        oldPlayer.release();
+        listener.onCompatibilityChanged(new AudioOutputCompatibilityEvent(true, true));
+    }
+
+    public synchronized PlaybackSnapshot.UserPlayIntent getUserPlayIntent() {
+        return userPlayIntent;
+    }
+
+    public synchronized ExoPlayback.PlayerPhase getPlayerPhase() {
+        return player == null ? ExoPlayback.PlayerPhase.IDLE : player.getPlayerPhase();
+    }
+
+    public synchronized AudioOutputController.AudioOutputPhase getAudioOutputPhase() {
+        return audioOutputController == null
+                ? AudioOutputController.AudioOutputPhase.NORMAL
+                : audioOutputController.getPhase();
+    }
+
+    public synchronized boolean isEffectiveAudioOffloadEnabled() {
+        return audioOutputController != null && audioOutputController.isEffectiveAudioOffloadEnabled();
+    }
+
+    public synchronized boolean hasUsedInInstanceRecovery() {
+        return audioOutputController != null && audioOutputController.hasUsedInInstanceRecovery();
+    }
+
+    public synchronized boolean hasUsedRebuildRecovery() {
+        return rebuildUsed;
     }
 
     public synchronized void destroy() {
