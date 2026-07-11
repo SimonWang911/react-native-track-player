@@ -34,6 +34,7 @@ public class LocalPlayback extends ExoPlayback<ExoPlayer> implements AudioOutput
     private boolean listenerAttached;
     private boolean analyticsAttached;
     private boolean cacheAcquired;
+    private boolean playerReleased;
     private boolean released;
     private final AnalyticsListener audioOutputListener = new AnalyticsListener() {
         @Override
@@ -331,10 +332,49 @@ public class LocalPlayback extends ExoPlayback<ExoPlayer> implements AudioOutput
     @Override
     public void destroy() {
         if (released) return;
-        released = true;
-        if (analyticsAttached) player.removeAnalyticsListener(audioOutputListener);
-        if (listenerAttached) player.removeListener(this);
-        super.destroy();
-        if (cacheAcquired) cache.release();
+        RuntimeException failure = null;
+        if (analyticsAttached) {
+            try {
+                player.removeAnalyticsListener(audioOutputListener);
+                analyticsAttached = false;
+            } catch (RuntimeException error) {
+                failure = appendFailure(failure, error);
+            }
+        }
+        if (listenerAttached) {
+            try {
+                player.removeListener(this);
+                listenerAttached = false;
+            } catch (RuntimeException error) {
+                failure = appendFailure(failure, error);
+            }
+        }
+        if (!playerReleased) {
+            try {
+                super.destroy();
+                playerReleased = true;
+            } catch (RuntimeException error) {
+                failure = appendFailure(failure, error);
+            }
+        }
+        if (cacheAcquired) {
+            try {
+                cache.release();
+                cacheAcquired = false;
+            } catch (RuntimeException error) {
+                failure = appendFailure(failure, error);
+            }
+        }
+        released = !analyticsAttached && !listenerAttached && playerReleased && !cacheAcquired;
+        if (failure != null) throw failure;
+    }
+
+    private static RuntimeException appendFailure(
+            RuntimeException aggregate,
+            RuntimeException failure
+    ) {
+        if (aggregate == null) return failure;
+        aggregate.addSuppressed(failure);
+        return aggregate;
     }
 }

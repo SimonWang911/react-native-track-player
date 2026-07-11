@@ -10,6 +10,7 @@ import android.os.Bundle;
 import com.guichaguri.trackplayer.service.player.AudioOutputController;
 import com.guichaguri.trackplayer.service.player.ExoPlayback;
 import com.guichaguri.trackplayer.service.player.PlaybackLifecycleController;
+import com.guichaguri.trackplayer.service.player.PlaybackCache;
 import com.guichaguri.trackplayer.service.player.PlaybackSetupSpec;
 
 import org.junit.Test;
@@ -66,6 +67,38 @@ public class MusicManagerSetupIntegrationTest {
         assertEquals(1, secondCallback.successes);
         assertSame(owner.current, firstCallback.player);
         assertSame(owner.current, secondCallback.player);
+    }
+
+    @Test
+    public void cacheConfigurationRetriesFactoryFailureThenKeepsFirstSuccessfulSize() {
+        ManualSerialQueue queue = new ManualSerialQueue();
+        RecordingOwner owner = new RecordingOwner();
+        PlaybackLifecycleController lifecycleController = new PlaybackLifecycleController(
+                queue,
+                setupSpec -> new RecordingPlayer(setupSpec.isAudioOffloadEnabled()),
+                owner,
+                new NoOpListener()
+        );
+        MusicService service = Robolectric.buildService(MusicService.class).get();
+        RecordingPlaybackCacheFactory cacheFactory = new RecordingPlaybackCacheFactory();
+        cacheFactory.failuresRemaining = 1;
+        MusicManager manager = new MusicManager(service, lifecycleController, cacheFactory);
+        RecordingSetupCallback failed = new RecordingSetupCallback();
+        RecordingSetupCallback configured = new RecordingSetupCallback();
+        RecordingSetupCallback later = new RecordingSetupCallback();
+
+        manager.setupPlayback(options(true, false, false, 1, 2, 3, 4, 5), failed);
+        manager.setupPlayback(options(true, false, false, 1, 2, 3, 4, 15), configured);
+        queue.runAll();
+        manager.setupPlayback(options(true, false, false, 1, 2, 3, 4, 25), later);
+        queue.runAll();
+
+        assertEquals(1, failed.failures);
+        assertEquals(1, configured.successes);
+        assertEquals(1, later.successes);
+        assertEquals(2, cacheFactory.requestedSizes.size());
+        assertEquals(Long.valueOf(5_120L), cacheFactory.requestedSizes.get(0));
+        assertEquals(Long.valueOf(15_360L), cacheFactory.requestedSizes.get(1));
     }
 
     private static Bundle options(
@@ -142,6 +175,7 @@ public class MusicManagerSetupIntegrationTest {
 
     private static final class RecordingSetupCallback implements PlaybackLifecycleController.SetupCallback {
         int successes;
+        int failures;
         AudioOutputController.PlayerAdapter player;
 
         @Override
@@ -151,7 +185,25 @@ public class MusicManagerSetupIntegrationTest {
         }
 
         @Override
-        public void onFailure(RuntimeException error) {}
+        public void onFailure(RuntimeException error) {
+            failures++;
+        }
+    }
+
+    private static final class RecordingPlaybackCacheFactory
+            implements MusicManager.PlaybackCacheFactory {
+        final List<Long> requestedSizes = new ArrayList<>();
+        int failuresRemaining;
+
+        @Override
+        public PlaybackCache create(MusicService service, long maxSize) {
+            requestedSizes.add(maxSize);
+            if (failuresRemaining > 0) {
+                failuresRemaining--;
+                throw new IllegalStateException("cache factory failed");
+            }
+            return new PlaybackCache(service, 0);
+        }
     }
 
     private static final class RecordingPlayer implements AudioOutputController.PlayerAdapter {

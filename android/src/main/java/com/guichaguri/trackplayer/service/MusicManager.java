@@ -49,6 +49,10 @@ import com.guichaguri.trackplayer.service.player.PlaybackSnapshot;
 @UnstableApi
 public class MusicManager implements PlaybackEventHandler, MusicBinder.PlaybackAccess {
 
+    interface PlaybackCacheFactory {
+        PlaybackCache create(MusicService service, long maxSize);
+    }
+
     private final MusicService service;
 
     private final WakeLock wakeLock;
@@ -58,7 +62,9 @@ public class MusicManager implements PlaybackEventHandler, MusicBinder.PlaybackA
     private ExoPlayback playback;
     private final Object lifecycleQueueToken = new Object();
     private final PlaybackLifecycleController lifecycleController;
+    private final PlaybackCacheFactory playbackCacheFactory;
     private PlaybackCache playbackCache;
+    // Shared cache capacity is fixed by the first factory call that completes successfully.
     private boolean playbackCacheConfigured;
 
     // @RequiresApi(26)
@@ -79,16 +85,25 @@ public class MusicManager implements PlaybackEventHandler, MusicBinder.PlaybackA
     private String playState = null;
 
     public MusicManager(MusicService service) {
-        this(service, null);
+        this(service, null, PlaybackCache::new);
+    }
+
+    MusicManager(
+            MusicService service,
+            PlaybackLifecycleController injectedLifecycleController
+    ) {
+        this(service, injectedLifecycleController, PlaybackCache::new);
     }
 
     @SuppressLint("InvalidWakeLockTag")
     MusicManager(
             MusicService service,
-            PlaybackLifecycleController injectedLifecycleController
+            PlaybackLifecycleController injectedLifecycleController,
+            PlaybackCacheFactory playbackCacheFactory
     ) {
         this.service = service;
         this.metadata = new MetadataManager(service, this);
+        this.playbackCacheFactory = playbackCacheFactory;
 
         PowerManager powerManager = (PowerManager)service.getSystemService(Context.POWER_SERVICE);
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "track-player-wake-lock");
@@ -180,7 +195,10 @@ public class MusicManager implements PlaybackEventHandler, MusicBinder.PlaybackA
         try {
             setupSpec = captureSetupSpec(options);
             if (!playbackCacheConfigured) {
-                playbackCache = new PlaybackCache(service, setupSpec.getMaxCacheSizeBytes());
+                playbackCache = playbackCacheFactory.create(
+                        service,
+                        setupSpec.getMaxCacheSizeBytes()
+                );
                 playbackCacheConfigured = true;
             }
         } catch (RuntimeException error) {
