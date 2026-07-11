@@ -61,7 +61,7 @@ public class LocalPlaybackCleanupIntegrationTest {
         assertEquals(2, cacheResource.releaseCalls);
     }
 
-    private static final class RecordingCache implements InvocationHandler {
+    static final class RecordingCache implements InvocationHandler {
         final Cache value = (Cache)Proxy.newProxyInstance(
                 Cache.class.getClassLoader(),
                 new Class<?>[] { Cache.class },
@@ -88,14 +88,16 @@ public class LocalPlaybackCleanupIntegrationTest {
         }
     }
 
-    private static final class RecordingExoPlayer implements InvocationHandler {
+    static final class RecordingExoPlayer implements InvocationHandler {
         final ExoPlayer value = (ExoPlayer)Proxy.newProxyInstance(
                 ExoPlayer.class.getClassLoader(),
                 new Class<?>[] { ExoPlayer.class },
                 this
         );
         int listenerRemovalFailures;
+        int analyticsAttachmentFailures;
         int releaseFailures;
+        int addAnalyticsListenerCalls;
         int removeAnalyticsListenerCalls;
         int removeListenerCalls;
         int releaseCalls;
@@ -103,7 +105,15 @@ public class LocalPlaybackCleanupIntegrationTest {
         @Override
         public Object invoke(Object proxy, Method method, Object[] args) {
             String name = method.getName();
-            if (name.equals("addListener") || name.equals("addAnalyticsListener")) return null;
+            if (name.equals("addListener")) return null;
+            if (name.equals("addAnalyticsListener")) {
+                addAnalyticsListenerCalls++;
+                if (analyticsAttachmentFailures > 0) {
+                    analyticsAttachmentFailures--;
+                    throw new IllegalStateException("analytics listener activation failed");
+                }
+                return null;
+            }
             if (name.equals("removeAnalyticsListener")) {
                 removeAnalyticsListenerCalls++;
                 return null;
@@ -124,6 +134,7 @@ public class LocalPlaybackCleanupIntegrationTest {
                 }
                 return null;
             }
+            if (name.equals("getMediaItemCount")) return 0;
             Class<?> returnType = method.getReturnType();
             if (returnType == boolean.class) return false;
             if (returnType == int.class) return C.INDEX_UNSET;

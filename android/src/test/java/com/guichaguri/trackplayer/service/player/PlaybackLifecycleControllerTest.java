@@ -448,7 +448,7 @@ public class PlaybackLifecycleControllerTest {
         shadowOf(Looper.getMainLooper()).idle();
 
         assertEquals(2, factory.players.size());
-        assertEquals(1, first.releaseCalls);
+        assertEquals(2, first.releaseCalls);
         assertEquals(1, listener.events.size());
         assertEquals(1, listener.unrecoveredErrors);
     }
