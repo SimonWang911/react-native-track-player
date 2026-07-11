@@ -1,5 +1,7 @@
 package com.guichaguri.trackplayer.service;
 
+import android.util.Log;
+
 import com.guichaguri.trackplayer.module.MusicEvents;
 import com.guichaguri.trackplayer.service.errors.StructuredPlaybackError;
 import com.guichaguri.trackplayer.service.player.AudioOutputCompatibilityEvent;
@@ -27,5 +29,10 @@ public final class PlaybackRecoveryEventBridge implements PlaybackLifecycleContr
                 false
         );
         service.emit(MusicEvents.PLAYBACK_ERROR, error.toBundle());
+    }
+
+    @Override
+    public void onInternalError(String code, RuntimeException error) {
+        Log.e(Utils.LOG, "Playback lifecycle internal error: " + code, error);
     }
 }

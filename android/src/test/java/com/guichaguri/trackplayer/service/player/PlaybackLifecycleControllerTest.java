@@ -249,6 +249,85 @@ public class PlaybackLifecycleControllerTest {
     }
 
     @Test
+    public void replacementCleanupFailureKeepsNewGenerationAndRetriesOldOnDestroy() {
+        List<String> operations = new ArrayList<>();
+        ManualSerialQueue queue = new ManualSerialQueue();
+        RecordingFactory factory = new RecordingFactory(operations);
+        RecordingOwner owner = new RecordingOwner(operations);
+        RecordingListener listener = new RecordingListener(operations);
+        PlaybackLifecycleController controller = new PlaybackLifecycleController(queue, factory, owner, listener);
+
+        controller.setup(true);
+        queue.runAll();
+        LifecyclePlayer first = factory.players.get(0);
+        first.releaseFailuresRemaining = 1;
+        RecordingSetupCallback callback = new RecordingSetupCallback();
+
+        controller.setup(false, callback);
+        queue.runAll();
+
+        LifecyclePlayer second = factory.players.get(1);
+        assertSame(second, owner.current);
+        assertEquals(1, callback.successes);
+        assertEquals(0, callback.failures);
+        assertEquals(1, first.releaseCalls);
+        assertEquals(Arrays.asList("playback_generation_cleanup_failed"), listener.internalErrorCodes);
+
+        controller.destroy();
+        queue.runAll();
+        controller.destroy();
+        queue.runAll();
+
+        assertEquals(2, first.releaseCalls);
+        assertEquals(1, second.releaseCalls);
+        assertEquals(null, owner.current);
+    }
+
+    @Test
+    public void throwingSuccessCallbackDoesNotStrandJoinedCallers() {
+        List<String> operations = new ArrayList<>();
+        ManualSerialQueue queue = new ManualSerialQueue();
+        RecordingFactory factory = new RecordingFactory(operations);
+        RecordingOwner owner = new RecordingOwner(operations);
+        RecordingListener listener = new RecordingListener(operations);
+        ThrowingSetupCallback throwing = ThrowingSetupCallback.onSuccess();
+        RecordingSetupCallback following = new RecordingSetupCallback();
+        PlaybackLifecycleController controller = new PlaybackLifecycleController(queue, factory, owner, listener);
+
+        controller.setup(true, throwing);
+        controller.setup(true, following);
+        queue.runAll();
+
+        assertEquals(1, throwing.successes);
+        assertEquals(1, following.successes);
+        assertEquals(0, following.failures);
+        assertEquals(Arrays.asList("setup_success_callback_failed"), listener.internalErrorCodes);
+    }
+
+    @Test
+    public void throwingFailureCallbackDoesNotStrandJoinedCallers() {
+        List<String> operations = new ArrayList<>();
+        ManualSerialQueue queue = new ManualSerialQueue();
+        RecordingFactory factory = new RecordingFactory(operations);
+        factory.failNextActivation = true;
+        RecordingOwner owner = new RecordingOwner(operations);
+        RecordingListener listener = new RecordingListener(operations);
+        ThrowingSetupCallback throwing = ThrowingSetupCallback.onFailure();
+        RecordingSetupCallback following = new RecordingSetupCallback();
+        PlaybackLifecycleController controller = new PlaybackLifecycleController(queue, factory, owner, listener);
+
+        controller.setup(true, throwing);
+        controller.setup(true, following);
+        queue.runAll();
+
+        assertEquals(1, throwing.failures);
+        assertEquals(0, following.successes);
+        assertEquals(1, following.failures);
+        assertEquals("activation failed", following.error.getMessage());
+        assertEquals(Arrays.asList("setup_failure_callback_failed"), listener.internalErrorCodes);
+    }
+
+    @Test
     public void activationFailureCompletesFailureQueueStaysLiveAndGenerationReleasesOnce() {
         List<String> operations = new ArrayList<>();
         HandlerSerialQueue queue = new HandlerSerialQueue(
@@ -444,10 +523,10 @@ public class PlaybackLifecycleControllerTest {
         }
 
         @Override
-        public AudioOutputController.PlayerAdapter create(boolean audioOffloadEnabled) {
+        public AudioOutputController.PlayerAdapter create(PlaybackSetupSpec setupSpec) {
             LifecyclePlayer player = new LifecyclePlayer(
                     "player-" + (players.size() + 1),
-                    audioOffloadEnabled,
+                    setupSpec.isAudioOffloadEnabled(),
                     operations
             );
             player.failActivation = failNextActivation;
@@ -492,6 +571,7 @@ public class PlaybackLifecycleControllerTest {
 
     static class RecordingListener implements PlaybackLifecycleController.Listener {
         final List<AudioOutputCompatibilityEvent> events = new ArrayList<>();
+        final List<String> internalErrorCodes = new ArrayList<>();
         final List<String> operations;
         int unrecoveredErrors;
 
@@ -509,6 +589,12 @@ public class PlaybackLifecycleControllerTest {
         public void onUnrecoveredAudioSinkError() {
             unrecoveredErrors++;
             operations.add("unrecovered");
+        }
+
+        @Override
+        public void onInternalError(String code, RuntimeException error) {
+            internalErrorCodes.add(code);
+            operations.add("internal:" + code);
         }
     }
 
@@ -531,6 +617,34 @@ public class PlaybackLifecycleControllerTest {
         }
     }
 
+    static class ThrowingSetupCallback extends RecordingSetupCallback {
+        private final boolean throwOnSuccess;
+
+        private ThrowingSetupCallback(boolean throwOnSuccess) {
+            this.throwOnSuccess = throwOnSuccess;
+        }
+
+        static ThrowingSetupCallback onSuccess() {
+            return new ThrowingSetupCallback(true);
+        }
+
+        static ThrowingSetupCallback onFailure() {
+            return new ThrowingSetupCallback(false);
+        }
+
+        @Override
+        public void onSuccess(AudioOutputController.PlayerAdapter player) {
+            super.onSuccess(player);
+            if (throwOnSuccess) throw new IllegalStateException("success callback failed");
+        }
+
+        @Override
+        public void onFailure(RuntimeException error) {
+            super.onFailure(error);
+            if (!throwOnSuccess) throw new IllegalStateException("failure callback failed");
+        }
+    }
+
     static class LifecyclePlayer implements AudioOutputController.PlayerAdapter {
         final String name;
         final List<String> operations;
@@ -548,6 +662,7 @@ public class PlaybackLifecycleControllerTest {
         boolean failActivation;
         boolean failPrepare;
         boolean failRelease;
+        int releaseFailuresRemaining;
         Runnable prepareHook;
 
         LifecyclePlayer(String name, boolean offloadEnabled, List<String> operations) {
@@ -671,6 +786,10 @@ public class PlaybackLifecycleControllerTest {
         public void release() {
             releaseCalls++;
             operations.add(name + ":release");
+            if (releaseFailuresRemaining > 0) {
+                releaseFailuresRemaining--;
+                throw new IllegalStateException("release failed");
+            }
             if (failRelease) throw new IllegalStateException("release failed");
         }
     }

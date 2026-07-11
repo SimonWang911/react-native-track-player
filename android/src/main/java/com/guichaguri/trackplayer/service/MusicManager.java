@@ -40,6 +40,7 @@ import com.guichaguri.trackplayer.service.player.LocalPlayback;
 import com.guichaguri.trackplayer.service.player.PlaybackCache;
 import com.guichaguri.trackplayer.service.player.PlaybackEventHandler;
 import com.guichaguri.trackplayer.service.player.PlaybackLifecycleController;
+import com.guichaguri.trackplayer.service.player.PlaybackSetupSpec;
 import com.guichaguri.trackplayer.service.player.PlaybackSnapshot;
 
 /**
@@ -55,10 +56,10 @@ public class MusicManager implements PlaybackEventHandler, MusicBinder.PlaybackA
 
     private final MetadataManager metadata;
     private ExoPlayback playback;
-    private Bundle playbackOptions = new Bundle();
     private final Object lifecycleQueueToken = new Object();
     private final PlaybackLifecycleController lifecycleController;
     private PlaybackCache playbackCache;
+    private boolean playbackCacheConfigured;
 
     // @RequiresApi(26)
     // private AudioFocusRequest focus = null;
@@ -77,8 +78,15 @@ public class MusicManager implements PlaybackEventHandler, MusicBinder.PlaybackA
     // private boolean alwaysPauseOnInterruption = false;
     private String playState = null;
 
-    @SuppressLint("InvalidWakeLockTag")
     public MusicManager(MusicService service) {
+        this(service, null);
+    }
+
+    @SuppressLint("InvalidWakeLockTag")
+    MusicManager(
+            MusicService service,
+            PlaybackLifecycleController injectedLifecycleController
+    ) {
         this.service = service;
         this.metadata = new MetadataManager(service, this);
 
@@ -93,30 +101,32 @@ public class MusicManager implements PlaybackEventHandler, MusicBinder.PlaybackA
             wifiLock.setReferenceCounted(false);
         }
 
-        lifecycleController = new PlaybackLifecycleController(
-                new HandlerSerialQueue(service.handler, lifecycleQueueToken),
-                audioOffloadEnabled -> createLocalPlayback(playbackOptions, audioOffloadEnabled),
-                new PlaybackLifecycleController.PlayerOwner() {
-                    @Override
-                    public void install(AudioOutputController.PlayerAdapter player) {
-                        playback = (LocalPlayback)player;
-                    }
+        lifecycleController = injectedLifecycleController != null
+                ? injectedLifecycleController
+                : new PlaybackLifecycleController(
+                        new HandlerSerialQueue(service.handler, lifecycleQueueToken),
+                        this::createLocalPlayback,
+                        new PlaybackLifecycleController.PlayerOwner() {
+                            @Override
+                            public void install(AudioOutputController.PlayerAdapter player) {
+                                playback = (LocalPlayback)player;
+                            }
 
-                    @Override
-                    public void swap(
-                            AudioOutputController.PlayerAdapter oldPlayer,
-                            AudioOutputController.PlayerAdapter newPlayer
-                    ) {
-                        playback = (LocalPlayback)newPlayer;
-                    }
+                            @Override
+                            public void swap(
+                                    AudioOutputController.PlayerAdapter oldPlayer,
+                                    AudioOutputController.PlayerAdapter newPlayer
+                            ) {
+                                playback = (LocalPlayback)newPlayer;
+                            }
 
-                    @Override
-                    public void clear(AudioOutputController.PlayerAdapter player) {
-                        if (playback == player) playback = null;
-                    }
-                },
-                new PlaybackRecoveryEventBridge(service)
-        );
+                            @Override
+                            public void clear(AudioOutputController.PlayerAdapter player) {
+                                if (playback == player) playback = null;
+                            }
+                        },
+                        new PlaybackRecoveryEventBridge(service)
+                );
     }
 
     @Override
@@ -166,26 +176,50 @@ public class MusicManager implements PlaybackEventHandler, MusicBinder.PlaybackA
             Bundle options,
             PlaybackLifecycleController.SetupCallback callback
     ) {
+        PlaybackSetupSpec setupSpec;
         try {
-            playbackOptions = new Bundle(options);
-            if (playbackCache == null) {
-                long maxCacheSize = (long)(options.getDouble("maxCacheSize", 0) * 1024);
-                playbackCache = new PlaybackCache(service, maxCacheSize);
+            setupSpec = captureSetupSpec(options);
+            if (!playbackCacheConfigured) {
+                playbackCache = new PlaybackCache(service, setupSpec.getMaxCacheSizeBytes());
+                playbackCacheConfigured = true;
             }
         } catch (RuntimeException error) {
             callback.onFailure(error);
             return;
         }
-        lifecycleController.setup(options.getBoolean("audioOffload", true), callback);
+        lifecycleController.setup(setupSpec, callback);
     }
 
-    private LocalPlayback createLocalPlayback(Bundle options, boolean shouldEnableAudioOffload) {
-        boolean autoUpdateMetadata = options.getBoolean("autoUpdateMetadata", true);
-        boolean shouldHandleAudioFocus = options.getBoolean("handleAudioFocus", true);
-        int minBuffer = (int)Utils.toMillis(options.getDouble("minBuffer", Utils.toSeconds(DEFAULT_MIN_BUFFER_MS)));
-        int maxBuffer = (int)Utils.toMillis(options.getDouble("maxBuffer", Utils.toSeconds(DEFAULT_MAX_BUFFER_MS)));
-        int playBuffer = (int)Utils.toMillis(options.getDouble("playBuffer", Utils.toSeconds(DEFAULT_BUFFER_FOR_PLAYBACK_MS)));
-        int backBuffer = (int)Utils.toMillis(options.getDouble("backBuffer", Utils.toSeconds(DEFAULT_BACK_BUFFER_DURATION_MS)));
+    private static PlaybackSetupSpec captureSetupSpec(Bundle options) {
+        return new PlaybackSetupSpec(
+                options.getBoolean("audioOffload", true),
+                options.getBoolean("autoUpdateMetadata", true),
+                options.getBoolean("handleAudioFocus", true),
+                (int)Utils.toMillis(options.getDouble(
+                        "minBuffer",
+                        Utils.toSeconds(DEFAULT_MIN_BUFFER_MS)
+                )),
+                (int)Utils.toMillis(options.getDouble(
+                        "maxBuffer",
+                        Utils.toSeconds(DEFAULT_MAX_BUFFER_MS)
+                )),
+                (int)Utils.toMillis(options.getDouble(
+                        "playBuffer",
+                        Utils.toSeconds(DEFAULT_BUFFER_FOR_PLAYBACK_MS)
+                )),
+                (int)Utils.toMillis(options.getDouble(
+                        "backBuffer",
+                        Utils.toSeconds(DEFAULT_BACK_BUFFER_DURATION_MS)
+                )),
+                (long)(options.getDouble("maxCacheSize", 0) * 1024)
+        );
+    }
+
+    private LocalPlayback createLocalPlayback(PlaybackSetupSpec setupSpec) {
+        int minBuffer = setupSpec.getMinBufferMs();
+        int maxBuffer = setupSpec.getMaxBufferMs();
+        int playBuffer = setupSpec.getPlayBufferMs();
+        int backBuffer = setupSpec.getBackBufferMs();
         int multiplier = DEFAULT_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS / DEFAULT_BUFFER_FOR_PLAYBACK_MS;
 
         LoadControl control = new DefaultLoadControl.Builder()
@@ -202,7 +236,7 @@ public class MusicManager implements PlaybackEventHandler, MusicBinder.PlaybackA
 
 
         TrackSelectionParameters trackSelectionParameters = player.getTrackSelectionParameters().buildUpon()
-            .setAudioOffloadPreferences(audioOffloadPreferences(shouldEnableAudioOffload))
+            .setAudioOffloadPreferences(audioOffloadPreferences(setupSpec.isAudioOffloadEnabled()))
             .build();
         player.setTrackSelectionParameters(trackSelectionParameters);
         // player.addAudioOffloadListener(new ExoPlayer.AudioOffloadListener() {
@@ -220,15 +254,16 @@ public class MusicManager implements PlaybackEventHandler, MusicBinder.PlaybackA
         // player.addAnalyticsListener(new EventLogger(null));
 
         player.setAudioAttributes(new androidx.media3.common.AudioAttributes.Builder()
-                .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).setUsage(C.USAGE_MEDIA).build(), shouldHandleAudioFocus);
+                .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).setUsage(C.USAGE_MEDIA).build(),
+                setupSpec.shouldHandleAudioFocus());
 
         return new LocalPlayback(
                 service,
                 this,
                 player,
                 playbackCache,
-                autoUpdateMetadata,
-                shouldEnableAudioOffload
+                setupSpec.shouldAutoUpdateMetadata(),
+                setupSpec.isAudioOffloadEnabled()
         );
     }
 

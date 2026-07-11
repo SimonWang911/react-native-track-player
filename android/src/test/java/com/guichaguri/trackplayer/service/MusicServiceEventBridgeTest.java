@@ -18,6 +18,7 @@ import com.guichaguri.trackplayer.module.MusicEvents;
 import com.guichaguri.trackplayer.service.player.AudioOutputController;
 import com.guichaguri.trackplayer.service.player.AudioOutputCompatibilityEvent;
 import com.guichaguri.trackplayer.service.player.PlaybackLifecycleController;
+import com.guichaguri.trackplayer.service.player.PlaybackSetupSpec;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -158,8 +159,8 @@ public class MusicServiceEventBridgeTest {
         final List<RecordingPlayer> players = new ArrayList<>();
 
         @Override
-        public AudioOutputController.PlayerAdapter create(boolean audioOffloadEnabled) {
-            RecordingPlayer player = new RecordingPlayer(audioOffloadEnabled);
+        public AudioOutputController.PlayerAdapter create(PlaybackSetupSpec setupSpec) {
+            RecordingPlayer player = new RecordingPlayer(setupSpec.isAudioOffloadEnabled());
             players.add(player);
             return player;
         }
