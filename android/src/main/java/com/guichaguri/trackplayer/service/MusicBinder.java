@@ -94,7 +94,7 @@ public class MusicBinder extends Binder {
     }
 
     public void clearNowPlayingMetadata() {
-        manager.getMetadata().setActive(false);
+        manager.getMetadata().clearNowPlayingMetadata();
     }
 
     public void updateNowPlayingTitles(long duration, String title, String artist, String album) {

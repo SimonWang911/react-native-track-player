@@ -7,6 +7,7 @@ import static android.support.v4.media.MediaMetadataCompat.METADATA_KEY_DURATION
 import static android.support.v4.media.MediaMetadataCompat.METADATA_KEY_TITLE;
 
 import android.annotation.SuppressLint;
+import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
@@ -54,27 +55,39 @@ public class MetadataManager {
     private final MusicService service;
     private final MusicManager manager;
     private final MediaSessionCompat session;
+    private final ArtworkRequestLoader artworkLoader;
+    private final ArtworkRenderSink renderSink;
 
     private int ratingType = RatingCompat.RATING_NONE;
     private int forwardJumpInterval = 15;
     private int backwardJumpInterval = 15;
     private long actions = 0;
     private long compactActions = 0;
-    private CustomTarget<Bitmap> artworkTarget;
+    private final ArtworkState artworkState = new ArtworkState();
     private NotificationCompat.Builder builder;
-    private MediaMetadataCompat.Builder prevMetadata = null;
-    private Uri prevArtwork = null;
-    private Bitmap prevArtResource = null;
+    private MediaMetadataCompat latestMetadata;
 
     private Action previousAction, rewindAction, playAction, pauseAction, stopAction, forwardAction, nextAction;
 
     @SuppressLint("UnspecifiedImmutableFlag")
     public MetadataManager(MusicService service, MusicManager manager) {
+        this(service, manager, createGlideArtworkLoader(service), createDefaultRenderSink(), null);
+    }
+
+    MetadataManager(
+            MusicService service,
+            MusicManager manager,
+            @Nullable ArtworkRequestLoader artworkLoader,
+            @Nullable ArtworkRenderSink renderSink,
+            @Nullable NotificationCompat.Builder notificationBuilder
+    ) {
         this.service = service;
         this.manager = manager;
 
         String channel = Utils.getNotificationChannel(service);
-        this.builder = new NotificationCompat.Builder(service, channel);
+        this.builder = notificationBuilder != null
+                ? notificationBuilder
+                : new NotificationCompat.Builder(service, channel);
         this.session = new MediaSessionCompat(service, "TrackPlayer", null, null);
 
         session.setFlags(MediaSessionCompat.FLAG_HANDLES_QUEUE_COMMANDS);
@@ -107,6 +120,9 @@ public class MetadataManager {
 
         // Make it visible in the lockscreen
         builder.setVisibility(NotificationCompat.VISIBILITY_PUBLIC);
+
+        this.artworkLoader = artworkLoader != null ? artworkLoader : createGlideArtworkLoader(service);
+        this.renderSink = renderSink != null ? renderSink : createDefaultRenderSink();
     }
 
     public MediaSessionCompat getSession() {
@@ -185,10 +201,19 @@ public class MetadataManager {
     }
 
     public void removeNotifications() {
+        clearNowPlayingMetadata();
         String ns = Context.NOTIFICATION_SERVICE;
         Context context = service.getApplicationContext();
         NotificationManager manager = (NotificationManager) context.getSystemService(ns);
         manager.cancelAll();
+    }
+
+    public void clearNowPlayingMetadata() {
+        invalidateArtwork();
+        latestMetadata = null;
+        session.setActive(false);
+        publishLatestMetadata();
+        updateNotification();
     }
     private static Bitmap safeCopyBitmap(@Nullable Bitmap src) {
         if (src == null) return null;
@@ -205,17 +230,150 @@ public class MetadataManager {
             return null;
         }
     }
-    private boolean setArt(MediaMetadataCompat.Builder metadata, NotificationCompat.Builder builder) {
-        if (prevArtResource == null) return false;
-        try {
-            if (prevArtResource.isRecycled()) {
-              prevArtResource = null;
-              return false;
+
+    private MediaMetadataCompat withCurrentArtwork(MediaMetadataCompat base) {
+        MediaMetadataCompat.Builder metadata = base == null
+                ? new MediaMetadataCompat.Builder()
+                : new MediaMetadataCompat.Builder(base);
+        Uri artwork = artworkState.getUri();
+        metadata.putString(METADATA_KEY_ART_URI, artwork == null ? null : artwork.toString());
+        metadata.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, artworkState.getBitmap());
+        return metadata.build();
+    }
+
+    private void clearArtworkPresentation() {
+        builder.setLargeIcon((Bitmap) null);
+    }
+
+    private void publishLatestMetadata() {
+        publishMetadata(latestMetadata);
+    }
+
+    private void invalidateArtwork() {
+        CustomTarget<Bitmap> previousTarget = artworkState.invalidate();
+        if (previousTarget != null) artworkLoader.clear(previousTarget);
+        clearArtworkPresentation();
+    }
+
+    private void handleArtworkReady(
+            long generation,
+            Uri artwork,
+            CustomTarget<Bitmap> target,
+            Bitmap resource
+    ) {
+        Bitmap copy = safeCopyBitmap(resource);
+        if (copy == null) {
+            handleArtworkFailure(generation, artwork, target);
+            return;
+        }
+        if (!artworkState.acceptReady(generation, artwork, target, copy)) return;
+
+        builder.setLargeIcon(copy);
+        latestMetadata = withCurrentArtwork(latestMetadata);
+        publishLatestMetadata();
+        updateNotification();
+    }
+
+    private void handleArtworkFailure(
+            long generation,
+            Uri artwork,
+            CustomTarget<Bitmap> target
+    ) {
+        if (!artworkState.acceptFailure(generation, artwork, target)) return;
+
+        clearArtworkPresentation();
+        latestMetadata = withCurrentArtwork(latestMetadata);
+        publishLatestMetadata();
+        updateNotification();
+    }
+
+    private void handleArtworkCleared(
+            long generation,
+            Uri artwork,
+            CustomTarget<Bitmap> target
+    ) {
+        if (!artworkState.acceptCleared(generation, artwork, target)) return;
+
+        clearArtworkPresentation();
+        latestMetadata = withCurrentArtwork(latestMetadata);
+        publishLatestMetadata();
+        updateNotification();
+    }
+
+    private static ArtworkRequestLoader createGlideArtworkLoader(MusicService service) {
+        return new LazyArtworkRequestLoader(() -> {
+            RequestManager rm = Glide.with(service.getApplicationContext());
+            return new ArtworkRequestLoader() {
+                @Override
+                public CustomTarget<Bitmap> load(Uri artwork, CustomTarget<Bitmap> target) {
+                    return rm.asBitmap()
+                            .load(artwork)
+                            .override(512, 512)
+                            .centerCrop()
+                            .into(target);
+                }
+
+                @Override
+                public void clear(CustomTarget<Bitmap> target) {
+                    rm.clear(target);
+                }
+            };
+        });
+    }
+
+    private static ArtworkRenderSink createDefaultRenderSink() {
+        return new ArtworkRenderSink() {
+            @Override
+            public void renderMetadata(
+                    MediaSessionCompat session,
+                    MediaMetadataCompat metadata
+            ) {
+                session.setMetadata(metadata);
             }
-        } catch (Exception e) { return false; }
-        metadata.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, prevArtResource);
-        builder.setLargeIcon(prevArtResource);
-        return true;
+
+            @Override
+            public void renderNotification(
+                    MusicService service,
+                    Notification notification
+            ) {
+                service.startForeground(1, notification);
+            }
+        };
+    }
+
+    private void publishMetadata(MediaMetadataCompat metadata) {
+        renderSink.renderMetadata(session, metadata);
+    }
+
+    private final class ArtworkTarget extends CustomTarget<Bitmap> {
+        private final Uri artwork;
+        private long generation;
+
+        ArtworkTarget(Uri artwork) {
+            this.artwork = artwork;
+        }
+
+        void setGeneration(long generation) {
+            this.generation = generation;
+        }
+
+        @Override
+        public void onResourceReady(
+                @NonNull Bitmap resource,
+                Transition<? super Bitmap> transition
+        ) {
+            handleArtworkReady(generation, artwork, this, resource);
+        }
+
+        @Override
+        public void onLoadFailed(@Nullable Drawable errorDrawable) {
+            handleArtworkFailure(generation, artwork, this);
+        }
+
+        @Override
+        public void onLoadCleared(@Nullable Drawable placeholder) {
+            handleArtworkCleared(generation, artwork, this);
+        }
     }
 
     /**
@@ -223,60 +381,41 @@ public class MetadataManager {
      * @param track The new track
      */
     public void updateMetadata(ExoPlayback playback, TrackMetadata track, boolean isPlaying) {
-        MediaMetadataCompat.Builder metadata = track.toMediaMetadata();
-        prevMetadata = metadata;
-
-        RequestManager rm = Glide.with(service.getApplicationContext());
-        if(artworkTarget != null) rm.clear(artworkTarget);
-
-        if(track.artwork == null) {
-            prevArtwork = null;
-            builder.setLargeIcon((Bitmap) null);
-        } else if (!track.artwork.equals(prevArtwork) || (prevArtResource != null && !this.setArt(metadata, builder))) {
-            prevArtwork = track.artwork;
-            prevArtResource = null;
-            artworkTarget = rm.asBitmap()
-                .load(track.artwork)
-                .override(512, 512)
-                .centerCrop()
-                .into(new CustomTarget<Bitmap>() {
-                    @Override
-                    public void onResourceReady(@NonNull Bitmap resource, Transition<? super Bitmap> transition) {
-                        prevArtResource = safeCopyBitmap(resource);
-                        if (setArt(metadata, builder)) {
-                          session.setMetadata(metadata.build());
-                          updateNotification();
-                        }
-                        artworkTarget = null;
-                    }
-
-                    @Override
-                    public void onLoadCleared(@Nullable Drawable placeholder) { }
-                });
+        ArtworkTarget newTarget = null;
+        if (track.artwork == null) {
+            invalidateArtwork();
+        } else if (!artworkState.canReuse(track.artwork)) {
+            newTarget = new ArtworkTarget(track.artwork);
+            ArtworkState.Begin begin = artworkState.begin(track.artwork, newTarget);
+            newTarget.setGeneration(begin.generation);
+            if (begin.previousTarget != null) artworkLoader.clear(begin.previousTarget);
+            clearArtworkPresentation();
         }
 
         builder.setContentTitle(track.title);
         builder.setContentText(track.artist);
         builder.setSubText(track.album);
 
-        session.setMetadata(metadata.build());
+        latestMetadata = withCurrentArtwork(track.toMediaMetadata().build());
+        publishLatestMetadata();
 
         updatePlayback(isPlaying);
         updatePlaybackState(playback);
         updateNotification();
+
+        if (newTarget != null) artworkLoader.load(track.artwork, newTarget);
     }
 
     public void updateNowPlayingTitles(ExoPlayback playback, long duration, String title, String artist, String album) {
-      MediaMetadataCompat.Builder metadata = new MediaMetadataCompat.Builder();
+      MediaMetadataCompat.Builder metadata = latestMetadata == null
+              ? new MediaMetadataCompat.Builder()
+              : new MediaMetadataCompat.Builder(latestMetadata);
       metadata.putString(METADATA_KEY_TITLE, title);
       metadata.putString(METADATA_KEY_ARTIST, artist);
       metadata.putString(METADATA_KEY_ALBUM, album);
-      if (prevArtwork != null) {
-        metadata.putString(METADATA_KEY_ART_URI, prevArtwork.toString());
-      }
-      this.setArt(metadata, builder);
       metadata.putLong(METADATA_KEY_DURATION, duration);
-      session.setMetadata(metadata.build());
+      latestMetadata = withCurrentArtwork(metadata.build());
+      publishLatestMetadata();
       updatePlaybackState(playback);
     }
 
@@ -339,7 +478,7 @@ public class MetadataManager {
 
     @SuppressLint("RestrictedApi")
     public void updatePlayback(ExoPlayback playback, boolean playing) {
-        if (prevMetadata != null) session.setMetadata(prevMetadata.build());
+        publishLatestMetadata();
         updatePlayback(playing);
         updatePlaybackState(playback);
         updateNotification();
@@ -361,15 +500,13 @@ public class MetadataManager {
 
     public void setActive(boolean active) {
         if (session.isActive() == active) return;
-        this.session.setActive(active);
-
+        session.setActive(active);
         updateNotification();
     }
 
     public void destroy() {
+        clearNowPlayingMetadata();
         service.stopForeground(true);
-
-        session.setActive(false);
         session.release();
     }
 
@@ -377,7 +514,8 @@ public class MetadataManager {
         // Log.d(Utils.LOG, "updateNotification");
         // Log.e(Utils.LOG, Log.getStackTraceString(new Throwable()));
         if(session.isActive()) {
-            service.startForeground(1, builder.build());
+            Notification notification = builder.build();
+            renderSink.renderNotification(service, notification);
         } else {
             service.stopForeground(true);
         }
